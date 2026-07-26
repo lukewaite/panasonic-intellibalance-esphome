@@ -24,10 +24,11 @@ non-inverted UART decode produces pure garbage on this link.
 
 Two practical gotchas:
 
-- **Edges are RC-limited** — roughly 80 µs of slew on a 208 µs bit. Thresholds must sit at true
-  mid-swing (≈2.35 V for RXD, ≈1.15 V for TXD). Anywhere else and you get a large duty-cycle skew
+- **Edges are RC-limited** — roughly 80 µs of slew on a 208 µs bit, and the two lines have very
+  different active levels, so no single threshold suits both. Thresholds must sit at each line's
+  true mid-swing (≈2.35 V for RXD, ≈1.15 V for TXD). Anywhere else and you get a duty-cycle skew
   that shifts the sampling points and corrupts the decode while looking like "noise" or
-  "oscillator tolerance".
+  "oscillator tolerance". `tools/decode.py` measures these from the capture, so this is handled.
 - **The TXD line's 2.3 V high is below the ESP32 V_IH of ~2.48 V.** An ESP32 cannot reliably read
   that line directly; it needs a comparator or level shifter. Whether 2.3 V is the genuine driven
   level or an artifact of probe placement is still unconfirmed.
@@ -95,9 +96,51 @@ a polled bus would be.
 ./tools/decode.py captures/YYYY-MM-DD/analog.csv --save-edges captures/YYYY-MM-DD/derived
 ```
 
-It reports byte, parity, stop-bit, frame and BCC counts per line. **Treat anything below 100 % on
-all of those as wrong framing parameters, not a noisy bus** — on a good capture every single byte
-and frame checks out.
+No per-capture tuning is needed: thresholds are measured from each channel's own rails and columns
+are matched by Saleae channel name. The tool reports the detected voltage rails, the measured bit
+time, and byte/parity/stop/frame/BCC counts per line.
+
+**Treat anything below 100 % on all of those as wrong parameters or a bad capture, not a noisy
+bus** — on a good capture every single byte and frame checks out. The tool prints a warning when
+the decode isn't clean.
+
+### Saleae capture settings
+
+| Setting | Value |
+|---|---|
+| Channels | 2 (currently D2 = TXD, D3 = RXD) |
+| **Analog** | **required** — this is what the decoder reads |
+| Analog sample rate | 1.25 MS/s (≈260 samples/bit; 625 kS/s is still ample) |
+| Digital | optional, and not used by the decoder |
+| Duration | 20–30 s per capture (≈40 MB `.sal`) |
+
+For the built-in **Async Serial** analyzer, if you want to read frames live in the Saleae app:
+
+| Setting | Value |
+|---|---|
+| Bit Rate | **4800** |
+| Bits per Frame | 8 |
+| Stop Bits | 1 |
+| Parity | **Even** |
+| Significant Bit | Least Significant Bit first |
+| Signal inversion | **Inverted** |
+
+Expect the in-app decode to still flag some framing errors, especially on TXD — the Saleae's
+digital threshold is a single fixed level and cannot suit both a 4.7 V line and a 2.3 V one at
+once. That is a display artifact of the digital threshold, not a bad capture. `tools/decode.py`
+on the analog export is the source of truth.
+
+### Capture timing constraints
+
+These follow from the link timing and set how long to hold still around each action:
+
+- Cycle time is 200 ms, so leave **≥1 s** either side of an action to catch the transition.
+- Registers `A1`/`B1`/`F1` appear only **once per second** — a capture shorter than a few seconds
+  can miss the sensor data entirely.
+- A command occupies the command line for **3 cycles (600 ms)** and then reverts, so a press is
+  visible on RXD for only ~0.6 s. Don't trim captures tightly.
+- After mains power-on the unit is **silent for 2.1 s** while it boots.
+- Allow **≥3 s between successive presses** so each command burst is unambiguous.
 
 ## Register map
 
@@ -168,8 +211,12 @@ is RXD and column 2 is TXD.
 
 ## Next steps
 
-1. **Airflow scaling.** Set a known CFM, capture, change to a second known CFM, capture. This
-   cracks the `0x30` byte and is the single biggest unknown.
+1. **Airflow scaling — do this one first.** The `0x30` byte is the single biggest unknown, and one
+   capture cracks it. Rather than two captures at two speeds, run a **staircase**: enter the
+   airflow setting, then press Up once every ~3 s for 6–8 steps, writing down the displayed CFM
+   after each press. One 30 s capture then yields a whole calibration curve of
+   (displayed CFM → byte value) pairs, which distinguishes a linear scale from a step index from a
+   percentage immediately. Two points could fit several mappings; eight cannot.
 2. **Sensor layout.** Toggle In/Out to confirm which `B1` bytes are inside vs outside, and
    re-capture at a clearly different temperature/humidity to test the `0x55 = 85 %RH` hypothesis.
    Do not build on that hypothesis until it is confirmed.

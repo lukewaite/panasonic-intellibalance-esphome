@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 """Decode the Panasonic Intelli-Balance 200 <-> FV-SW20VEC1 wall control link.
 
-Pipeline:  Saleae analog CSV  ->  mid-swing re-threshold  ->  inverted 8E1 UART
+Pipeline:  Saleae analog CSV  ->  auto mid-swing threshold  ->  inverted 8E1 UART
            @4800 baud  ->  STX/ETX framing  ->  BCC-checked register blocks
 
-Why re-threshold from analog instead of using Saleae's digital export: the line
-edges are RC-limited (~80 us slew on a 208 us bit). Thresholds that are not at
-true mid-swing introduce a large duty-cycle skew, which shifts the sampling
-points and corrupts the decode. See CLAUDE.md.
+Why re-threshold from analog rather than using Saleae's digital export: the two
+lines have very different active levels (RXD reaches ~4.7 V, TXD only ~2.3 V), so
+no single digital threshold suits both. Edges are also RC-limited (~80 us slew on
+a 208 us bit), so an off-centre threshold introduces a duty-cycle skew that shifts
+the sampling points and corrupts the decode. Thresholds are measured per channel
+from the capture itself, so a fresh capture needs no code changes. See CLAUDE.md.
 
 Usage
 -----
-  # full run from the analog export (~20 s for a 645 MB / 26.9 M sample file)
-  ./tools/decode.py captures/2025-12-14/analog.csv
+  # full run from a fresh analog export, caching the edges for later
+  ./tools/decode.py captures/2026-07-26/analog.csv --save-edges captures/2026-07-26/derived
 
-  # cache the extracted edges so later runs are instant
-  ./tools/decode.py captures/2025-12-14/analog.csv --save-edges captures/2025-12-14/derived
-  ./tools/decode.py --edges captures/2025-12-14/derived
+  # replay from cached edges (instant)
+  ./tools/decode.py --edges captures/2026-07-26/derived
 
-  # only frames whose payload changed from the previous frame at that address
-  ./tools/decode.py --edges captures/2025-12-14/derived --changes
+  # only frames whose register value changed -- the useful view
+  ./tools/decode.py --edges captures/2026-07-26/derived --changes
 
 Requires only the standard library; numpy is deliberately not used.
 """
@@ -34,37 +35,100 @@ import sys
 STX, ETX = 0x02, 0x03
 
 # Verified against the 2025-12-14 capture: 596/596 frames pass BCC and
-# 7769/7769 bytes pass both parity and stop-bit checks.
+# 7769/7769 bytes pass both parity and stop-bit checks. The decode stays clean
+# across roughly 204-215 us, so this needs no per-capture tuning.
 BIT_SECONDS = 208.4e-6
 DATA_BITS = 8
 
-# Per-channel analog thresholds, placed at mid-swing with hysteresis.
-# The two lines have very different active levels: RXD reaches 4.7 V, TXD only 2.3 V.
-CHANNELS = [
-    # name  csv_col  falling_thresh  rising_thresh  residual skew correction (us)
-    ("rxd", 1, 1.90, 2.80, -16.0, +16.0),
-    ("txd", 2, 0.90, 1.40, +18.0, -18.0),
-]
-
 # The link labels are from the *unit's* point of view, so the line named RXD is
 # the one the unit receives on: wall control -> unit.
-DIRECTION = {"rxd": "panel->unit (command)", "txd": "unit->panel (state)"}
+LINES = ("RXD", "TXD")
+DIRECTION = {"RXD": "panel->unit (command)", "TXD": "unit->panel (state)"}
+
+LEVEL_SUBSAMPLE = 20      # every Nth sample is enough to measure the rails
+RAIL_PERCENTILE = 0.005   # trim this fraction off each end when finding rails
+HYSTERESIS = 0.10         # +/- this fraction of the swing around mid-point
 
 
-def extract_edges(analog_path):
-    """Stream the analog CSV and return {name: [(t, level), ...]} at mid-swing."""
-    edges = {name: [] for name, *_ in CHANNELS}
-    state = {name: 0 for name, *_ in CHANNELS}
-    with open(analog_path) as fh:
-        header = fh.readline()
-        if "Time" not in header:
-            sys.exit("error: %s does not look like a Saleae analog CSV export" % analog_path)
+def detect_columns(header):
+    """Map line name -> CSV column index using the Saleae channel names."""
+    fields = [f.strip().strip('"') for f in header.split(",")]
+    cols = {}
+    for name in LINES:
+        for i, f in enumerate(fields):
+            if i > 0 and name.lower() in f.lower():
+                cols[name] = i
+                break
+    if len(cols) != len(LINES):
+        if len(fields) >= 3:
+            cols = {"RXD": 1, "TXD": 2}
+            print("note: channel names not found in header %r; assuming "
+                  "column 1=RXD, 2=TXD" % header.strip(), file=sys.stderr)
+        else:
+            sys.exit("error: cannot find RXD/TXD columns in header: %r" % header.strip())
+    return cols
+
+
+def measure_levels(path, cols):
+    """Subsampled pass to find each channel's low and high rail."""
+    hist = {name: collections.Counter() for name in cols}
+    with open(path) as fh:
+        fh.readline()
+        for n, line in enumerate(fh):
+            if n % LEVEL_SUBSAMPLE:
+                continue
+            parts = line.split(",")
+            if len(parts) <= max(cols.values()):
+                continue
+            for name, col in cols.items():
+                hist[name][round(float(parts[col]), 2)] += 1
+
+    levels = {}
+    for name, h in hist.items():
+        total = sum(h.values())
+        if not total:
+            sys.exit("error: no samples for %s" % name)
+        keys = sorted(h)
+        cut = total * RAIL_PERCENTILE
+        acc = 0
+        low = keys[0]
+        for k in keys:
+            acc += h[k]
+            if acc >= cut:
+                low = k
+                break
+        acc = 0
+        high = keys[-1]
+        for k in reversed(keys):
+            acc += h[k]
+            if acc >= cut:
+                high = k
+                break
+        levels[name] = (low, high)
+    return levels
+
+
+def thresholds_from_levels(low, high):
+    """Hysteresis band centred on mid-swing."""
+    mid = (low + high) / 2.0
+    band = (high - low) * HYSTERESIS
+    return mid - band, mid + band
+
+
+def extract_edges(path, cols, thresh):
+    """Stream the analog CSV and return {name: [(t, level), ...]}."""
+    edges = {name: [] for name in cols}
+    state = {name: 0 for name in cols}
+    maxcol = max(cols.values())
+    with open(path) as fh:
+        fh.readline()
         for line in fh:
             parts = line.split(",")
-            if len(parts) < 3:
+            if len(parts) <= maxcol:
                 continue
             t = None
-            for name, col, lo, hi, _, _ in CHANNELS:
+            for name, col in cols.items():
+                lo, hi = thresh[name]
                 v = float(parts[col])
                 if state[name] == 0 and v > hi:
                     state[name] = 1
@@ -78,11 +142,28 @@ def extract_edges(analog_path):
     return edges
 
 
-def apply_skew(edges, rise_us, fall_us):
-    """Nudge edges to cancel the residual duty-cycle skew left by slow slew."""
-    out = [(t + (rise_us if v == 1 else fall_us) * 1e-6, v) for t, v in edges]
-    out.sort()
-    return out
+def measure_bit_time(edges):
+    """Estimate bit time from the shortest recurring pulse in each polarity.
+
+    A one-bit pulse is stretched in one polarity and squeezed in the other by the
+    same amount, so averaging the two cancels the slew-induced skew.
+    Returns (bit_us, skew_us) or None if the capture is too sparse.
+    """
+    widths = {0: collections.Counter(), 1: collections.Counter()}
+    for i in range(len(edges) - 1):
+        w = (edges[i + 1][0] - edges[i][0]) * 1e6
+        if w < 2600:
+            widths[edges[i][1]][int(round(w / 4.0)) * 4] += 1
+    shortest = {}
+    for level, h in widths.items():
+        if not h:
+            return None
+        floor = max(h.values()) * 0.10   # ignore rare glitch-width bins
+        candidates = [w for w, c in h.items() if c >= floor]
+        if not candidates:
+            return None
+        shortest[level] = min(candidates)
+    return (shortest[1] + shortest[0]) / 2.0, (shortest[1] - shortest[0]) / 2.0
 
 
 class Waveform:
@@ -164,8 +245,8 @@ def render(payload):
 
 def load_edges(dirpath):
     edges = {}
-    for name, *_ in CHANNELS:
-        path = os.path.join(dirpath, "edges-%s.csv" % name)
+    for name in LINES:
+        path = os.path.join(dirpath, "edges-%s.csv" % name.lower())
         if not os.path.exists(path):
             sys.exit("error: %s not found" % path)
         rows = []
@@ -181,7 +262,7 @@ def load_edges(dirpath):
 def save_edges(edges, dirpath):
     os.makedirs(dirpath, exist_ok=True)
     for name, rows in edges.items():
-        path = os.path.join(dirpath, "edges-%s.csv" % name)
+        path = os.path.join(dirpath, "edges-%s.csv" % name.lower())
         with open(path, "w") as fh:
             fh.write("time_s,level\n")
             for t, v in rows:
@@ -196,41 +277,75 @@ def main():
     ap.add_argument("--edges", metavar="DIR", help="load cached edges from DIR instead")
     ap.add_argument("--save-edges", metavar="DIR", help="write extracted edges to DIR")
     ap.add_argument("--start", type=float, default=0.0,
-                    help="ignore data before this capture timestamp (default 0)")
+                    help="ignore data before this capture timestamp")
     ap.add_argument("--changes", action="store_true",
                     help="only print frames whose data changed for that address")
+    ap.add_argument("--bit-us", type=float, default=BIT_SECONDS * 1e6,
+                    help="bit time in us (default %.1f, ~4800 baud)" % (BIT_SECONDS * 1e6))
     args = ap.parse_args()
 
     if args.edges:
         edges = load_edges(args.edges)
     elif args.analog_csv:
-        edges = extract_edges(args.analog_csv)
+        with open(args.analog_csv) as fh:
+            header = fh.readline()
+        if "Time" not in header:
+            sys.exit("error: %s does not look like a Saleae analog CSV export"
+                     % args.analog_csv)
+        cols = detect_columns(header)
+        levels = measure_levels(args.analog_csv, cols)
+        thresh = {}
+        for name, (low, high) in levels.items():
+            thresh[name] = thresholds_from_levels(low, high)
+            print("%s: rails %+.2f V .. %+.2f V (swing %.2f V) -> thresholds %.2f / %.2f V"
+                  % (name, low, high, high - low, thresh[name][0], thresh[name][1]),
+                  file=sys.stderr)
+            if high - low < 1.0:
+                print("  WARNING: swing under 1 V -- is this channel connected and active?",
+                      file=sys.stderr)
+        edges = extract_edges(args.analog_csv, cols, thresh)
     else:
         ap.error("give an analog CSV path or --edges DIR")
 
     if args.save_edges:
         save_edges(edges, args.save_edges)
 
+    bit = args.bit_us * 1e-6
     rows = []
-    for name, _, _, _, rise, fall in CHANNELS:
-        stream = decode_bytes(apply_skew(edges[name], rise, fall))
-        stream = [b for b in stream if b[0] >= args.start]
+    clean = True
+    for name in LINES:
+        timing = measure_bit_time(edges[name])
+        if timing:
+            measured, skew = timing
+            note = ""
+            if abs(measured - args.bit_us) > 0.05 * args.bit_us:
+                note = "  <-- differs >5%% from the %.1f us being used, consider --bit-us" % args.bit_us
+                clean = False
+            print("%s: measured bit time %.1f us (%.0f baud), slew skew %+.0f us%s"
+                  % (name, measured, 1e6 / measured, skew, note), file=sys.stderr)
+
+        stream = [b for b in decode_bytes(edges[name], bit=bit) if b[0] >= args.start]
         if not stream:
-            print("%s: no bytes decoded" % name.upper(), file=sys.stderr)
+            print("%s: no bytes decoded" % name, file=sys.stderr)
+            clean = False
             continue
         frames, skipped = parse_frames([(t, v) for t, v, _, _ in stream])
         good = sum(1 for f in frames if f[3])
         par = sum(1 for b in stream if b[2])
         stp = sum(1 for b in stream if b[3])
         print("%s  %-22s %d bytes (parity %d, stop %d)  %d frames (BCC ok %d)  %d unframed bytes"
-              % (name.upper(), DIRECTION[name], len(stream), par, stp,
-                 len(frames), good, skipped), file=sys.stderr)
-        if good != len(frames) or par != len(stream):
-            print("  WARNING: not a clean decode -- check thresholds and bit time",
-                  file=sys.stderr)
+              % (name, DIRECTION[name], len(stream), par, stp, len(frames), good, skipped),
+              file=sys.stderr)
+        if good != len(frames) or par != len(stream) or not frames:
+            clean = False
         for t, payload, got, ok in frames:
             addr, data = render(payload)
-            rows.append((t, name.upper(), addr, data, got, ok))
+            rows.append((t, name, addr, data, got, ok))
+
+    if not clean:
+        print("\nWARNING: this is not a clean decode. On a good capture every byte passes\n"
+              "parity and every frame passes BCC. Suspect the capture or the parameters,\n"
+              "not the bus -- check the measured rails and bit time above.\n", file=sys.stderr)
 
     rows.sort()
     last = {}

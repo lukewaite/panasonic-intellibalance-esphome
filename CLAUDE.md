@@ -44,9 +44,18 @@ Never trust `digital.csv`, `rxd.txt`, or `txd.txt`.
 ./tools/decode.py captures/2025-12-14/analog.csv --save-edges captures/2025-12-14/derived
 ```
 
-The last form re-extracts from analog (~10 s for 26.9M samples). It prints per-line byte/parity/
-stop/BCC/frame counts to stderr; **anything below 100 % on all of those means the framing
-parameters are wrong, not that the bus is noisy.**
+The last form re-extracts from analog (~15 s for 26.9M samples) and needs no tuning: thresholds
+are **measured per channel from the capture itself** (0.5 % / 99.5 % rails, hysteresis at ±10 % of
+swing around mid-point), and columns are matched by Saleae channel name. It reports the detected
+rails and the measured bit time, then per-line byte/parity/stop/BCC/frame counts.
+
+**Anything below 100 % on all of those means the parameters or the capture are wrong, not that the
+bus is noisy.** The tool says so explicitly when the decode isn't clean.
+
+Margins are wide, so don't fiddle: the decode stays clean from 204–215 µs of bit time, and the
+slew skew correction turned out to be unnecessary altogether (it is measured and reported, but not
+applied). If a future capture reports a bit time more than 5 % off 208.4 µs, the tool flags it and
+`--bit-us` overrides.
 
 `analog.csv` is 645 MB / 26.9M lines — stream it line by line, don't load it into memory, and
 don't reach for numpy (not installed). Columns: `Time [s], RXD, TXD`.

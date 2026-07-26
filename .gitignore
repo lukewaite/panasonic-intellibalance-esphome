@@ -5,3 +5,6 @@
 # ground truth is the `Session *.sal` file, which holds the full raw analog data for
 # every channel. Re-export from the Saleae app when you need the CSV.
 analog.csv
+
+__pycache__/
+*.pyc

@@ -1,26 +1,26 @@
 time_s     line addr data      bcc  ok
-  6.833711 RXD  00   FFFFFFFF  FC   ok
-  6.863490 RXD  10   FFFFFFFF  FD   ok
-  6.881498 TXD  01   00000000  FD   ok
-  6.893271 RXD  20   FFFFFFFF  FE   ok
-  6.911275 TXD  11   00000000  FC   ok
-  6.923053 RXD  30   FFFFFFFF  FF   ok
-  6.941053 TXD  21   00000000  FF   ok
-  6.952832 RXD  F0   FFFFFFFF  8A   ok
-  6.970830 TXD  31   00000000  FE   ok
-  7.458106 TXD  A1   00000000  8C   ok
-  7.487881 TXD  B1   41D13055  FC   ok
-  7.517654 TXD  F1   00003E00  FD   ok
-  8.944654 RXD  00   FFFFFF00  FC   ok  <-- changed
-  8.974408 RXD  10   FFFF0000  FD   ok  <-- changed
-  9.004163 RXD  20   FF000000  FE   ok  <-- changed
-  9.033920 RXD  30   00000000  FF   ok  <-- changed
-  9.063675 RXD  F0   00000000  8A   ok  <-- changed
- 14.236047 RXD  00   10303000  FD   ok  <-- changed
- 14.265807 RXD  10   20FF0000  FF   ok  <-- changed
- 14.295567 RXD  20   00000000  FE   ok  <-- changed
- 14.665718 TXD  01   10303000  FC   ok  <-- changed
- 14.695491 TXD  11   20000000  FE   ok  <-- changed
- 14.836329 RXD  00   FFFFFF00  FC   ok  <-- changed
- 14.866087 RXD  10   FFFF0000  FD   ok  <-- changed
- 14.895845 RXD  20   FF000000  FE   ok  <-- changed
+  6.833727 RXD  00   FFFFFFFF  FC   ok
+  6.863506 RXD  10   FFFFFFFF  FD   ok
+  6.881480 TXD  01   00000000  FD   ok
+  6.893287 RXD  20   FFFFFFFF  FE   ok
+  6.911257 TXD  11   00000000  FC   ok
+  6.923069 RXD  30   FFFFFFFF  FF   ok
+  6.941035 TXD  21   00000000  FF   ok
+  6.952848 RXD  F0   FFFFFFFF  8A   ok
+  6.970812 TXD  31   00000000  FE   ok
+  7.458088 TXD  A1   00000000  8C   ok
+  7.487863 TXD  B1   41D13055  FC   ok
+  7.517636 TXD  F1   00003E00  FD   ok
+  8.944670 RXD  00   FFFFFF00  FC   ok  <-- changed
+  8.974424 RXD  10   FFFF0000  FD   ok  <-- changed
+  9.004179 RXD  20   FF000000  FE   ok  <-- changed
+  9.033936 RXD  30   00000000  FF   ok  <-- changed
+  9.063691 RXD  F0   00000000  8A   ok  <-- changed
+ 14.236063 RXD  00   10303000  FD   ok  <-- changed
+ 14.265823 RXD  10   20FF0000  FF   ok  <-- changed
+ 14.295583 RXD  20   00000000  FE   ok  <-- changed
+ 14.665700 TXD  01   10303000  FC   ok  <-- changed
+ 14.695474 TXD  11   20000000  FE   ok  <-- changed
+ 14.836346 RXD  00   FFFFFF00  FC   ok  <-- changed
+ 14.866103 RXD  10   FFFF0000  FD   ok  <-- changed
+ 14.895861 RXD  20   FF000000  FE   ok  <-- changed
