@@ -1,0 +1,7 @@
+.DS_Store
+
+# Saleae CSV analog exports are huge (645 MB for the 2025-12-14 capture) and exceed
+# GitHub's 100 MB per-file limit. They are a regenerable text export -- the archival
+# ground truth is the `Session *.sal` file, which holds the full raw analog data for
+# every channel. Re-export from the Saleae app when you need the CSV.
+analog.csv
