@@ -1,59 +1,215 @@
 # Panasonic Intelli-Balance 200 Wall Control Reverse-Engineering
 
-Goal: decode the low-voltage protocol between the Intelli-Balance 200 unit and the FV-SW20VEC1 wall control, then build an ESPHome-based inline interface (similar spirit to ratgdo).
+Decoding the low-voltage protocol between a **Panasonic Intelli-Balance 200 ERV** and its
+**FV-SW20VEC1 wall control**, with the goal of building an ESPHome-based inline interface for
+Home Assistant (similar in spirit to ratgdo).
 
-## Current knowledge
-- 4-conductor link labeled `5V`, `0V`, `RXD`, `TXD` (thermostat-style connector).
-- Likely 5 V supply provided from the unit to the wall control.
-- Observed signal swing on RXD/TXD: ~1.2 V to ~3.8 V (treat as 3.3 V TTL levels).
-- UI buttons: On/Off, Boost (immediate actions); In/Out (toggles displayed temp source); Time, Set, Up, Down, Filter (hold 3s to reset), Vent (used for settings); display shows supply/exhaust speed, inside/outside temp/humidity, ASHRAE value.
+**Status:** the transport is fully decoded and verified. The register *semantics* are only
+partially mapped — see [Register map](#register-map) and [Next steps](#next-steps).
+
+## The protocol
+
+### Physical layer
+
+**4800 baud, 8 data bits, even parity, 1 stop bit (8E1), inverted.**
+
+Inverted matters: both lines **idle at 0 V**, so the start bit is a *rising* edge. A conventional
+non-inverted UART decode produces pure garbage on this link.
+
+| | RXD line | TXD line |
+|---|---|---|
+| Idle | 0 V | 0 V |
+| Active | 4.7 V | 2.3 V |
+| Bit time | 208.4 µs | 208.4 µs |
+
+Two practical gotchas:
+
+- **Edges are RC-limited** — roughly 80 µs of slew on a 208 µs bit. Thresholds must sit at true
+  mid-swing (≈2.35 V for RXD, ≈1.15 V for TXD). Anywhere else and you get a large duty-cycle skew
+  that shifts the sampling points and corrupts the decode while looking like "noise" or
+  "oscillator tolerance".
+- **The TXD line's 2.3 V high is below the ESP32 V_IH of ~2.48 V.** An ESP32 cannot reliably read
+  that line directly; it needs a comparator or level shifter. Whether 2.3 V is the genuine driven
+  level or an artifact of probe placement is still unconfirmed.
+
+### Frame format
+
+```
+0x02 (STX) | A1 A0 | D7 D6 D5 D4 D3 D2 D1 D0 | 0x03 (ETX) | BCC
+```
+
+13 bytes. `A1 A0` and `D7..D0` are **ASCII hex characters**, so each frame carries a
+2-character register address plus 4 data bytes.
+
+**BCC** is the complement of the XOR over every byte from the address through ETX inclusive:
+
+```python
+def bcc(payload):        # payload = the 10 ASCII chars between STX and ETX
+    x = 0
+    for b in payload:
+        x ^= b
+    return (~(x ^ 0x03)) & 0xFF
+```
+
+Worked example — `02 '0' '0' 'F' 'F' 'F' 'F' 'F' 'F' 'F' 'F' 03 FC`: `'0'^'0'` is 0, the eight
+`'F'` cancel to 0, `^ 0x03` gives `0x03`, and `~0x03` is `0xFC`. ✓
+
+### Direction
+
+**RXD = wall control → unit (commands). TXD = unit → wall control (state).**
+
+The wire labels are therefore from the **unit's** point of view, not the panel's.
+
+This is established from the data, not assumed. On the On/Off press, RXD register `00` changed,
+held its new value for exactly 3 cycles, then **reverted** to its idle pattern — after which TXD
+register `01` latched that same value permanently. A transient burst that reverts is a command;
+the value that latches is the resulting state.
+
+### Link timing
+
+Both sides **free-run independently at ~200 ms** — no polling, no arbitration, no master. RXD's
+period is 200.1 ms and TXD's is 200.2 ms, and they drift slowly against each other. Within a
+cycle, blocks are spaced ~29.7 ms.
+
+- RXD sends **5 blocks/cycle**: `00 10 20 30 F0`
+- TXD sends **4 blocks/cycle**: `01 11 21 31`
+- Once per second, TXD's slot carries `A1 B1 F1` *instead of* `01 11 21 31`
+
+The address low nibble encodes direction: `0` on RXD, `1` on TXD. Because the two directions are
+on separate wires and neither side waits for the other, an inline interface is much simpler than
+a polled bus would be.
+
+## Decoding a capture
+
+`tools/decode.py` implements the whole pipeline — analog CSV → mid-swing re-threshold → inverted
+8E1 UART → framing → BCC check. Standard library only, no dependencies.
+
+```bash
+# from the committed edge lists (instant)
+./tools/decode.py --edges captures/2025-12-14/derived --start 6.8
+
+# only frames whose register value changed — the entire capture in ~25 lines
+./tools/decode.py --edges captures/2025-12-14/derived --start 6.8 --changes
+
+# from a fresh Saleae analog export (~10 s for 26.9M samples)
+./tools/decode.py captures/YYYY-MM-DD/analog.csv --save-edges captures/YYYY-MM-DD/derived
+```
+
+It reports byte, parity, stop-bit, frame and BCC counts per line. **Treat anything below 100 % on
+all of those as wrong framing parameters, not a noisy bus** — on a good capture every single byte
+and frame checks out.
+
+## Register map
+
+From the 2025-12-14 capture (ERV mains power-on, then an On/Off press). This is one capture of one
+transition, so it pins down very little.
+
+Command line (RXD) — note the `FF` staircase in the idle pattern:
+
+| addr | idle / no request | during On/Off command (3 cycles) |
+|---|---|---|
+| `00` | `FFFFFF00` | `10303000` |
+| `10` | `FFFF0000` | `20FF0000` |
+| `20` | `FF000000` | `00000000` |
+| `30` | `00000000` | `00000000` |
+| `F0` | `00000000` | `00000000` |
+
+At mains power-on all five RXD registers send `FFFFFFFF` once, then the line goes quiet for 2.1 s
+while the unit boots.
+
+State line (TXD):
+
+| addr | unit off | unit on |
+|---|---|---|
+| `01` | `00000000` | `10303000` |
+| `11` | `00000000` | `20000000` |
+| `21` / `31` / `A1` | `00000000` | `00000000` |
+| `B1` | `41D13055` | `41D13055` |
+| `F1` | `00003E00` | `00003E00` |
+
+### Hypotheses — unconfirmed
+
+Everything below is speculation and should be treated as such until a second capture confirms it.
+
+- **`B1` is probably the sensor register.** The operator noted outside temp 37 °F and outside
+  humidity 85 %RH, and `B1 = 41 D1 30 55` contains `0x55 = 85`, matching outside RH exactly. The
+  rest is guesswork: `0x41 = 65` (inside temp °F?), `0x30 = 48` (inside RH %?), `0xD1 = 209`
+  (outside temp in some offset encoding? 37 °F = 2.78 °C doesn't fall out of this cleanly).
+  One matching byte out of four is not evidence — it could easily be coincidence.
+- **`00`/`01` = `10 30 30 00`:** the two equal `0x30` bytes look like supply and exhaust airflow,
+  which the operator noted as 80 cfm / 80 cfm. But `0x30` is 48, not 80, so the mapping is unknown
+  — percent of maximum? A speed index? Byte 0 (`0x10`) is plausibly a mode/on flag.
+- **`0xFF` in a command byte may mean "no change / don't care",** which fits both the idle pattern
+  and register `10` sending `20FF0000` while the resulting state is `20000000`.
+- **`F1 = 00003E00`** — `0x3E` is 62, unexplained. The ASHRAE setting was 20, so it isn't that
+  directly.
+
+## Hardware
+
+- 4-conductor thermostat-style link on `CN2`: `5V`, `0V`, `RXD`, `TXD`. The 5 V supply comes from
+  the unit to the wall control.
 - Wall control PCB (photo `pcb.jpg`):
   - Silkscreen PCB-86ER-U-M-V1.1 (2020/08/21), sticker SW20VE111D RoHS TNA16.
-  - CN2 = `5V`, `0V`, `RXD`, `TXD` (matches the field wiring).
-  - CN1 unpopulated 5-pin header, J1 6-pin test header (RESET, +5V, GND) suggesting in-circuit programming/debug.
-  - No obvious RS-485/CAN transceiver; signaling likely direct 5 V TTL UART to the MCU.
-  - Main MCU at U1 marked `0257 231014` (unknown vendor/family); likely handles display/buttons directly.
+  - `CN1` unpopulated 5-pin header; `J1` 6-pin test header (RESET, +5V, GND), suggesting
+    in-circuit programming/debug.
+  - No RS-485 or CAN transceiver — signaling goes more or less directly to the MCU.
+  - Main MCU at U1 marked `0257 231014` (vendor/family unidentified); likely drives the display
+    and buttons directly.
+- UI buttons: On/Off and Boost (immediate actions); In/Out (toggles the displayed temp source);
+  Time, Set, Up, Down, Filter (hold 3 s to reset), Vent (settings). The display shows
+  supply/exhaust speed, inside/outside temp and humidity, and an ASHRAE value.
 
-## Capture wiring notes
-- Current logic analyzer lead mapping (D2/D3): `D2` = red lead on `TXD`; `D3` = orange lead on `RXD`; common ground to `0V`.
+### Capture setup
 
-## Working assumptions
-- Signaling is probably TTL UART at 5 V. Idle-high would indicate non-inverted UART; idle-low or differential swing would suggest otherwise.
-- RXD/TXD are relative to the wall control (i.e., panel RXD = panel input, TXD = panel output). To be confirmed by capture.
+Ground to `0V`, probe `RXD` and `TXD`, and **capture analog as well as digital** — digital exports
+bake in threshold choices, and getting those wrong is what derailed the first attempt. Logic
+analyzer mapping used so far: `D2` = TXD (red), `D3` = RXD (orange). In the CSV exports, column 1
+is RXD and column 2 is TXD.
 
-## Captures
-- `captures/2025-12-14/2025-12-14-notes.md` and analyzer exports `rxd.txt` / `txd.txt` (latest re-export). Sequence: power-on of ERV, then On/Off press; display at capture time: 80 cfm supply/exhaust, ASHRAE 20.
-- Raw exports: `captures/2025-12-14/digital.csv` and `analog.csv` (full capture).
-- Observed levels: RXD ~1.2–3.9 V; TXD ~1.2–2.34 V. Use per-channel thresholds (RXD ~1.5–2.0 V, TXD ~1.0–1.5 V).
-- Preliminary decode from raw edges:
-  - RXD: ~9600 baud, 8N1, non-inverted (idle high). Bytes around 6.13–6.20 s decode cleanly (repeating `0xFC` frames, etc.).
-  - TXD: ~4800 baud, 8N1, non-inverted (idle high). Bytes around 6.178–6.25 s decode to a repeating stream (`0x3F 0xAE 0xE6 0xEE ...`).
-- Suggested Saleae setup: separate Async Serial analyzers per line (RXD at 9600 8N1 non-inverted; TXD at 4800 8N1 non-inverted). Confirm framing errors drop to zero.
-- Glitch-filtered capture (2025-12-14, thresholds ~2.0 V RXD / ~1.1 V TXD):
-  - Offline decode works cleanly at bit times ~102.4 µs (RXD ≈ 9.76 kbps) and ~204.3 µs (TXD ≈ 4.89 kbps), 8N1, non-inverted, grouping with 5 ms gaps.
-  - RXD common frames: short `FC C7` pairs (hundreds), and longer status-like blocks with heavy `FC/FF/C7` patterns.
-  - TXD common frames: frequent `E6 3E EE 9F … 2E F9` blocks, heartbeats like `3F 3E AE 9D` and `EE … 2E`, plus shorter `A6 3A` bursts.
-  - Saleae still flags some framing errors (likely oscillator/tolerance); offline decode of the raw digital edges yields consistent packets.
+## Next steps
 
-## Immediate data to gather
-1) **Idle voltages**: measure each conductor to ground with the system powered. Note if RXD/TXD sit high (~5 V) or low at idle.  
-2) **Continuity**: confirm the 5 V and 0 V pins are shared with panel ground; ensure logic analyzer ground matches.  
-3) **Board markings (optional but helpful)**: photos or chip part numbers on the wall control PCB and the unit’s low-voltage board, especially any transceivers or test pads.
+1. **Airflow scaling.** Set a known CFM, capture, change to a second known CFM, capture. This
+   cracks the `0x30` byte and is the single biggest unknown.
+2. **Sensor layout.** Toggle In/Out to confirm which `B1` bytes are inside vs outside, and
+   re-capture at a clearly different temperature/humidity to test the `0x55 = 85 %RH` hypothesis.
+   Do not build on that hypothesis until it is confirmed.
+3. **Remaining controls.** Boost, ASHRAE percentage, timer, filter reset — one isolated action per
+   capture.
+4. **Hardware validation.** Measure the TXD high level at both cable ends to settle whether the
+   2.3 V swing is real, then choose a level shifter or comparator front end.
+5. **Passive ESPHome sniffer** on both lines (inverted UART, 4800 8E1) to log long runs and catch
+   registers that only move on a slow schedule.
+6. **Inline bridge** with selective command injection, once the command registers are understood.
 
-## First capture plan (Saleae)
-- Connect GND to `0V`. Probe `RXD` and `TXD`. Leave `5V` unprobed unless using analog for reference.
-- Start with 10–25 MHz digital sample rate; if file size is an issue, also take a 2–5 MHz version.
-- Capture sequences:
-  - Full power-on from wall control connected.
-  - Button events spaced a few seconds apart: Off→On, Boost toggle, In/Out toggle, entering/exiting a settings change (e.g., adjust a speed or timer).
-  - Let the unit run briefly to capture steady-state chatter.
-- Log actions with timestamps for each capture.
-- Run Saleae protocol suggestions on each line: UART search (common rates 9600/19200/38400/57600/115200, 8N1), I2C, 1-Wire. Check if the two lines look differential/inverted.
+Per-capture protocol: store as `captures/YYYY-MM-DD/` with a `YYYY-MM-DD-notes.md` operator log,
+one isolated action per capture, and **log a timestamp for every button press**. The existing notes
+were timed by counting in the operator's head, and reconciling them against the capture took real
+effort — the press is at 14.24 s, not the noted ~10 s.
 
-## Next steps after first captures
-- Determine directionality: which line is panel→unit vs unit→panel.
-- Identify baud rate and framing; extract a few payloads per button action.
-- Spot recurring frames (heartbeat/status) vs event-driven frames.
-- Based on baud and framing, craft a passive ESPHome UART sniffer to log traffic for longer runs, then move toward an inline bridge with selective command injection.
+## Repo layout
 
-If you can provide the idle voltages and a power-on + button-press capture, we can lock in baud/framing and start decoding messages.
+```
+tools/decode.py                 The decoder (stdlib only)
+pcb.jpg                         Wall control PCB photo
+captures/2025-12-14/
+  Session 0.sal                Saleae session — archival ground truth (28 MB)
+  analog.csv                   Analog export, 645 MB — GITIGNORED, regenerate from the .sal
+  digital.csv, rxd.txt, txd.txt  First-attempt exports — INVALID, kept for provenance only
+  2025-12-14-notes.md          Operator log
+  derived/                     Re-thresholded edge lists + state-change summary
+```
+
+`analog.csv` is gitignored because it exceeds GitHub's 100 MB per-file limit. Nothing is lost: the
+`.sal` holds the full raw analog data, and the committed `derived/edges-*.csv` reproduce the decode
+byte-for-byte without it.
+
+## On the first attempt (December 2025)
+
+The initial investigation reached a wrong decode and stalled. Its protocol conclusions —
+9600 baud on RXD, 8N1, non-inverted, "3.3 V TTL" levels, and byte streams like `FC C7` and
+`3F AE E6 EE` — are all artifacts of two off-centre Saleae thresholds on slow edges, which
+cascaded into the wrong baud rate, polarity and framing. The framing errors it attributed to
+oscillator tolerance had the same root cause.
+
+Its *hardware* observations (pinout, PCB markings, button inventory) were sound and are retained
+above. The original log is preserved in git history at commit `6e51cac`.

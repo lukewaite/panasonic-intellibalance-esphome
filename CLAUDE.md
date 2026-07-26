@@ -172,9 +172,11 @@ Treat everything in this section as unproven. The transport is solved; the seman
   and with `10` sending `20FF0000` while the resulting state is `20000000`.
 - `F1 = 00003E00`, `0x3E = 62` — unexplained. ASHRAE setting was 20, so this is not it directly.
 
-## Corrections to README.md
+## Superseded claims from the first attempt
 
-The README predates a correct decode. These claims in it are **wrong**:
+README.md has been rewritten to match the verified decode, so these errors survive only in git
+history (commit `6e51cac`) and in the stale `rxd.txt` / `txd.txt` / `digital.csv` exports. Listed
+here so they aren't accidentally reintroduced from those files:
 
 1. "RXD ~9600 baud" — no. **Both lines are 4800 baud.**
 2. "non-inverted (idle high)" — no. **Both lines are inverted, idle low (0 V).**
@@ -186,7 +188,8 @@ The README predates a correct decode. These claims in it are **wrong**:
    was wrong polarity and off-centre thresholds.
 6. "Directionality to be determined" — resolved, see above.
 
-The README's hardware observations (connector pinout, PCB markings, button inventory) are fine.
+The first attempt's hardware observations (connector pinout, PCB markings, button inventory) were
+sound and are retained in README.md.
 
 ## Conventions for this repo
 
