@@ -1,0 +1,5 @@
+Quantity,Manufacturer Part Number,Manufacturer,DigiKey Part Number,Reference,Description,Notes
+1,G6S-2 DC5,Omron/Aratas,Z2615-ND,K1,DPDT signal relay 5V THT 28mA,Matches the Relay_DPDT_Omron_G6S-2 footprint
+1,OS102011MS2QN1,C&K,,SW1,SPDT slide switch THT vertical,"Must be MS2Q (vertical), not MA1Q (right-angle)"
+2,1715747,Phoenix Contact,,"J1,J2",4-pos 5.08mm screw terminal (MKDS 1.5/4-5.08),Generic 5.08mm KF128-style blocks also fit
+1,PRPC040SAAN-RC,Sullins,,J3,1x40 breakaway male header 2.54mm,Cut 8 pins for the probe header

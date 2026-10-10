@@ -1,0 +1,7 @@
+build/
+fab/gerbers/
+*.kicad_prl
+*-backups/
+_autosave-*
+*.lck
+lib/3d/
