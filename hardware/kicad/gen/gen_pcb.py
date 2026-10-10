@@ -72,7 +72,7 @@ PLACE = {
     # bus-power jumper, next to the BUS5V run
     "D6": (30.5, 36.0, 0), "JP1": (30.5, 39.5, 0),
     # power, bottom right
-    "J4": (90.0, H - 3.4, 0),     # USB-C shell lip ~0.25 mm past the bottom edge
+    "J4": (90.0, H - 2.9, 0),     # USB-C shell lip ~0.8 mm past the edge, so a cable reaches through the box wall
     "R28": (85.0, 43.5, 0), "R29": (95.0, 43.5, 0),
     "U3": (70.0, 44.5, 0), "C7": (65.0, 50.5, 90), "C8": (70.0, 50.5, 90), "C9": (74.0, 50.5, 90),
     "R30": (88.0, 34.0, 0), "LED1": (88.0, 37.0, 0),
@@ -81,12 +81,13 @@ PLACE = {
     "J2": (36.0, TERM_Y, 0),
     # M3 holes for standoffs screwed through the box floor
     "H1": (10.5, 4.0, 0), "H2": (106.5, 31.5, 0), "H3": (3.8, 40.0, 0), "H4": (106.5, 42.0, 0),
+    "H5": (59.0, 52.0, 0),        # supports the terminal edge against screwdriver / wire-pull loads
 }
 
 # Assembly doesn't need designators; keep them where a person will look:
 # ICs, connectors, and the resistors tuned at bring-up.
 SHOW_PASSIVE_REF = {"R18", "R19", "R20", "R21", "R24", "R25"}
-HIDE_REF = {"J1", "J2", "D1", "D6", "JP1", "TP1", "TP2", "LED1", "LED2", "H1"}
+HIDE_REF = {"J1", "J2", "D1", "D6", "JP1", "TP1", "TP2", "LED1", "LED2", "H1", "H5"}
 REF_AT = {"K1": (30.4, 18.2), "U1": (UX, 22.0)}   # inside the part outlines
 
 SILK = [  # (text, x, y, size_mm, justify)  JLCPCB minimum: 1.0 mm high, 0.15 mm stroke

@@ -246,8 +246,10 @@ Firmware must set `esp32: flash_size: 8MB`; ESPHome otherwise assumes a 4 MB par
   ([drawing](https://www.hammfg.com/pdf/1591C.pdf)). Plastic, so the antenna works through it.
 - The board is 110 × 56 mm, centred in the box. Its 7 × 7.5 mm corner notches clear the four
   Ø8.65 mm lid-screw bosses (106.65 × 51.65 mm grid).
-- Mount on four **M3 × 12 mm standoffs** (nylon preferred near the antenna), screwed through holes
-  drilled in the box floor. Drill template: the board itself, or the H1–H4 positions below.
+- Mount on five **M3 standoffs, 12 mm maximum** (nylon preferred near the antenna), screwed through
+  holes drilled in the box floor. Taller standoffs eat the lid clearance above the screw terminals
+  (~2 mm worst case under the lid lip with 12 mm; check the terminal's real height). Drill
+  template: the board itself, or the positions below.
 - All cables enter through the **long wall next to the screw terminals**.
 
 Drilling guide, measured from the outside of the box. "From left" is from the left end of that
@@ -259,16 +261,17 @@ real box and adjust**.
 |---|---|---|---|---|
 | A | 22.6 mm | ~18 mm | Ø8–10 mm (or grommet) | thermostat cable from the ERV → J1 |
 | B | 48.6 mm | ~18 mm | Ø8–10 mm (or grommet) | thermostat cable to the wall control → J2 |
-| C | 95.0 mm | ~17 mm (centre) | 12 × 7 mm slot | USB-C plug |
+| C | 95.0 mm | ~17 mm (centre) | 13 × 7.5 mm slot | USB-C cable overmould (the receptacle sits ~1.5 mm behind the outer wall face; test with your cable) |
 
 Floor holes for the standoffs (board coordinates + 5 mm in length, + 4.5 mm in width, from the
 outside left/back corner as seen from above with the cable wall at the front): H1 (15.5, 8.5),
-H2 (111.5, 36.0), H3 (8.8, 44.5), H4 (111.5, 46.5) mm. Easiest: lay the bare board in the box and
+H2 (111.5, 36.0), H3 (8.8, 44.5), H4 (111.5, 46.5), H5 (64.0, 56.5) mm. H5 supports the
+terminal edge against screwdriver and wire-pull loads. Easiest: lay the bare board in the box and
 mark through its holes.
 
-With the box sitting on the ERV, the antenna is only ~15 mm above the metal lid (floor +
-standoffs). Lift the box on its own small feet or a spacer if reception is weak, and point the
-antenna end of the box toward the border router.
+With the box sitting directly on the ERV, the antenna is ~16 mm above the metal (floor + 12 mm
+standoffs + board): just above the 15 mm minimum, so don't mount it any closer. Lift the box on
+feet or a spacer if reception is weak, and point the antenna end toward the border router.
 
 ## BOM (rev A)
 
@@ -301,8 +304,11 @@ come from LCSC (same shipment) or DigiKey.
 
 Ordering notes:
 - Upload `kicad/fab/ervlink-gerbers.zip`, then `ervlink-bom.csv` and `ervlink-cpl.csv`.
-- **Edge rails:** U1 and J4 sit closer than JLCPCB's 2.5 mm component-to-edge assembly rule, so
-  choose "Edge Rails: added by JLCPCB" (or expect a DFM query).
+- **Panel / edge rails:** U1 and J4 sit closer than JLCPCB's 2.5 mm component-to-edge assembly
+  rule, so JLCPCB will want rails. The corner notches rule out V-cut, so rails are tab-routed and
+  leave mouse-bite stubs. The board has only ~0.6 mm per side of clearance across the box width,
+  so ask for tabs on the **short (56 mm) edges only**, or sand any long-edge stubs flush before
+  fitting it in the box.
 - **Rotations:** check every part's pin 1 in JLCPCB's placement preview. Likely corrections
   (community tables, not verified): SOIC-8 U2 +270°, SOT-223 U3 +180°, SOT-23 Q1–Q3 180°, USB-C
   J4 180° (opening must face the bottom edge), U1 probably 0° (antenna toward the top edge),

@@ -175,7 +175,7 @@ part("#FLG1", "power:PWR_FLAG", "PWR_FLAG", "", (290, 200), {"1": "GND"})
 part("#FLG2", "power:PWR_FLAG", "PWR_FLAG", "", (305, 200), {"1": "+5V"})
 part("#FLG3", "power:PWR_FLAG", "PWR_FLAG", "", (320, 200), {"1": "BUS5V"})
 
-for i, at in enumerate([(290, 240), (305, 240), (320, 240), (335, 240)], start=1):
+for i, at in enumerate([(290, 240), (305, 240), (320, 240), (335, 240), (350, 240)], start=1):
     part(f"H{i}", "Mechanical:MountingHole", "M3", "MountingHole:MountingHole_3.2mm_M3", at, {})
 
 
