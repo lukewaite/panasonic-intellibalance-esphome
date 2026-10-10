@@ -29,68 +29,86 @@ KICAD_FP = "/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints"
 LOCAL_FP = {"Espressif": os.path.join(PROJ, "lib", "Espressif.pretty")}
 FREEROUTING = os.path.expanduser("~/.local/share/freerouting/freerouting-2.4.1.jar")
 
-W, H = 85.0, 60.0          # board size, mm
+# Board sized for a Hammond 1591C (inside 112.05 x 57.24 mm at the card guides).
+# The four corner notches clear the box's Ø8.65 mm lid-screw bosses, which sit
+# on a 106.65 x 51.65 mm grid centred in the box (board centred too).
+W, H = 110.0, 56.0
+NOTCH_X, NOTCH_Y = 7.0, 7.5
 OX, OY = 100.0, 60.0       # board origin on the page
+OUTLINE = [(NOTCH_X, 0), (W - NOTCH_X, 0), (W - NOTCH_X, NOTCH_Y), (W, NOTCH_Y), (W, H - NOTCH_Y),
+           (W - NOTCH_X, H - NOTCH_Y), (W - NOTCH_X, H), (NOTCH_X, H), (NOTCH_X, H - NOTCH_Y),
+           (0, H - NOTCH_Y), (0, NOTCH_Y), (NOTCH_X, NOTCH_Y)]
 
 # ref: (x, y, rotation_deg) in board mm, y down. Rationale in DESIGN.md:
 # antenna on the top edge, every cable entry on the bottom edge, relay and
 # screw terminals far from the antenna.
+UX, UY = 93.0, 16.0       # module right edge at x 102.0, 1 mm from the top-right notch
+TERM_Y = H - 5.1          # screw terminal origin: body front at the bottom edge
 PLACE = {
-    # top edge: module antenna flush with the top edge, keep-out to its left
-    "U1": (74.5, 16.0, 0),
-    "C6": (62.8, 9.0, 180), "C5": (62.8, 11.2, 180),  # pad 1 right next to U1 pin 2 (+3V3)
-    "SW1": (14.0, 5.0, 0),
+    # top edge: module antenna at the top edge; the notch is beside its feed side
+    "U1": (UX, UY, 0),
+    "C6": (UX - 11.7, 9.0, 180), "C5": (UX - 11.7, 11.2, 180),   # pad 1 next to U1 pin 2 (+3V3)
+    "R26": (UX - 14.0, 14.0, 0), "C4": (UX - 14.0, 16.5, 0), "R27": (UX - 14.0, 19.0, 0),
+    "TP1": (UX - 18.0, 14.0, 0), "TP2": (UX - 18.0, 17.5, 0),
+    "SW1": (20.0, 5.0, 0),
     # relay and its driver, left
-    "K1": (20.0, 12.0, 0),
-    "D1": (22.54, 8.9, 0),        # bridges coil pins 1 and 12
-    "R1": (13.5, 24.0, 0), "LED2": (13.5, 27.0, 0),
-    "Q1": (14.0, 32.0, 0), "R2": (10.0, 34.2, 0), "R3": (10.0, 37.2, 0),
-    "J3": (4.0, 14.0, 0),
-    "R20": (9.0, 40.8, 0), "R21": (13.5, 40.8, 0),
+    "K1": (28.0, 12.0, 0),
+    "D1": (30.54, 8.9, 0),        # bridges coil pins 1 and 12
+    "R1": (20.5, 24.0, 0), "LED2": (20.5, 27.0, 0),
+    "Q1": (22.0, 31.5, 0), "R2": (18.0, 33.6, 0), "R3": (18.0, 36.6, 0),
+    "J3": (11.0, 14.0, 0),
+    "R20": (16.5, 40.0, 0), "R21": (21.5, 40.0, 0),
     # comparator taps, centre
-    "U2": (40.0, 16.0, 0), "C3": (45.2, 14.5, 90),
-    "R4": (31.0, 8.0, 0), "R5": (31.0, 11.0, 0), "C1": (31.0, 14.0, 0), "R6": (31.0, 17.0, 0),
-    "R7": (31.0, 20.0, 0), "R8": (31.0, 23.0, 0), "R9": (31.0, 26.0, 0),
-    "R10": (49.0, 8.0, 0), "R11": (49.0, 11.0, 0), "C2": (49.0, 14.0, 0), "R12": (49.0, 17.0, 0),
-    "R13": (49.0, 20.0, 0), "R14": (49.0, 23.0, 0), "R15": (49.0, 26.0, 0),
+    "U2": (52.0, 16.0, 0), "C3": (57.2, 14.5, 90),
+    "R4": (43.0, 8.0, 0), "R5": (43.0, 11.0, 0), "C1": (43.0, 14.0, 0), "R6": (43.0, 17.0, 0),
+    "R7": (43.0, 20.0, 0), "R8": (43.0, 23.0, 0), "R9": (43.0, 26.0, 0),
+    "R10": (61.0, 8.0, 0), "R11": (61.0, 11.0, 0), "C2": (61.0, 14.0, 0), "R12": (61.0, 17.0, 0),
+    "R13": (61.0, 20.0, 0), "R14": (61.0, 23.0, 0), "R15": (61.0, 26.0, 0),
     # line drivers, centre
-    "Q2": (34.0, 36.0, 0), "R16": (29.0, 34.0, 0), "R17": (29.0, 38.0, 0),
-    "R18": (39.0, 34.0, 0), "R19": (39.0, 38.0, 0),
-    "Q3": (48.0, 36.0, 0), "R22": (43.0, 34.0, 0), "R23": (43.0, 38.0, 0),
-    "R24": (53.0, 34.0, 0), "R25": (53.0, 38.0, 0),
-    # ESP support, left of the module
-    "R26": (60.5, 14.0, 0), "C4": (60.5, 16.5, 0), "R27": (60.5, 19.0, 0),
-    "TP1": (56.5, 14.0, 0), "TP2": (56.5, 17.5, 0),
+    "Q2": (44.0, 35.0, 0), "R16": (39.0, 33.0, 0), "R17": (39.0, 37.0, 0),
+    "R18": (49.0, 33.0, 0), "R19": (49.0, 37.0, 0),
+    "Q3": (60.0, 35.0, 0), "R22": (55.0, 33.0, 0), "R23": (55.0, 37.0, 0),
+    "R24": (65.0, 33.0, 0), "R25": (65.0, 37.0, 0),
+    # bus-power jumper, next to the BUS5V run
+    "D6": (30.5, 36.0, 0), "JP1": (30.5, 39.5, 0),
     # power, bottom right
-    "J4": (73.0, 56.6, 0),        # USB-C shell lip ~0.25 mm past the bottom edge
-    "R28": (68.0, 47.5, 0), "R29": (78.0, 47.5, 0),
-    "U3": (60.0, 44.0, 0), "C7": (55.0, 50.0, 90), "C8": (60.0, 50.0, 90), "C9": (64.0, 50.0, 90),
-    "JP1": (23.5, 44.2, 0), "D6": (23.5, 41.0, 0),    # next to the BUS5V run
-    "R30": (72.0, 36.0, 0), "LED1": (72.0, 39.0, 0),
+    "J4": (90.0, H - 3.4, 0),     # USB-C shell lip ~0.25 mm past the bottom edge
+    "R28": (85.0, 43.5, 0), "R29": (95.0, 43.5, 0),
+    "U3": (70.0, 44.5, 0), "C7": (65.0, 50.5, 90), "C8": (70.0, 50.5, 90), "C9": (74.0, 50.5, 90),
+    "R30": (88.0, 34.0, 0), "LED1": (88.0, 37.0, 0),
     # bus terminals, bottom edge, wire entry facing out
-    "J1": (6.0, 54.5, 0),
-    "J2": (32.0, 54.5, 0),
-    # mounting holes
-    "H1": (3.5, 3.5, 0), "H2": (81.5, 30.5, 0), "H3": (3.5, 44.5, 0), "H4": (81.5, 43.0, 0),
+    "J1": (10.0, TERM_Y, 0),
+    "J2": (36.0, TERM_Y, 0),
+    # M3 holes for standoffs screwed through the box floor
+    "H1": (10.5, 4.0, 0), "H2": (106.5, 31.5, 0), "H3": (3.8, 40.0, 0), "H4": (106.5, 42.0, 0),
 }
 
 # Assembly doesn't need designators; keep them where a person will look:
 # ICs, connectors, and the resistors tuned at bring-up.
 SHOW_PASSIVE_REF = {"R18", "R19", "R20", "R21", "R24", "R25"}
-HIDE_REF = {"J1", "J2", "D1", "D6", "JP1", "TP1", "TP2", "LED1", "LED2"}
-REF_AT = {"K1": (22.4, 18.2)}   # inside the relay outline
+HIDE_REF = {"J1", "J2", "D1", "D6", "JP1", "TP1", "TP2", "LED1", "LED2", "H1"}
+REF_AT = {"K1": (30.4, 18.2), "U1": (UX, 22.0)}   # inside the part outlines
 
 SILK = [  # (text, x, y, size_mm, justify)  JLCPCB minimum: 1.0 mm high, 0.15 mm stroke
-    ("TO ERV", 13.6, 46.0, 1.2, "c"), ("TO WALL CONTROL", 39.6, 46.0, 1.2, "c"),
-    ("ERV LINK rev A", 40.0, 29.0, 1.4, "c"),
-    ("AUTO", 8.0, 5.0, 1.0, "c"), ("PASS", 25.0, 5.0, 1.0, "c"),
-    ("EN", 54.4, 14.0, 1.0, "r"), ("BOOT", 54.4, 17.5, 1.0, "r"),
-    ("JP1: NOT WITH USB", 25.6, 44.2, 1.0, "l"), ("PWR", 74.5, 39.0, 1.0, "l"),
-    ("INT", 11.3, 27.0, 1.0, "r"),
-] + [(t, x, 48.1, 1.2, "c") for x0 in (6.0, 32.0)
+    ("TO ERV", 17.6, 42.6, 1.2, "c"), ("TO WALL CONTROL", 43.6, 42.6, 1.2, "c"),
+    ("ERV LINK rev A", 52.0, 29.0, 1.4, "c"),
+    ("AUTO", 14.0, 5.0, 1.0, "c"), ("PASS", 31.0, 5.0, 1.0, "c"),
+    ("EN", UX - 20.1, 14.0, 1.0, "r"), ("BOOT", UX - 20.1, 17.5, 1.0, "r"),
+    ("JP1: NOT WITH USB", 32.6, 39.5, 1.0, "l"), ("PWR", 90.5, 37.0, 1.0, "l"),
+    ("INT", 22.8, 27.0, 1.0, "l"),
+] + [(t, x, 44.6, 1.2, "c") for x0 in (10.0, 36.0)
      for t, x in zip(("5V", "0V", "RXD", "TXD"), (x0 + 5.08 * i for i in range(4)))] \
-  + [(t, 6.0, 14.0 + 2.54 * i, 1.0, "l")
+  + [(t, 13.0, 14.0 + 2.54 * i, 1.0, "l")
      for i, t in enumerate(("GND", "3V3", "pRX", "eRX", "eTX", "pTX", "dRX", "dTX"))]
+
+
+def on_board(x, y, margin=1.2):
+    """Inside the notched outline with `margin` from every edge (board mm)."""
+    if not (margin <= x <= W - margin and margin <= y <= H - margin):
+        return False
+    in_x_notch = x < NOTCH_X + margin or x > W - NOTCH_X - margin
+    in_y_notch = y < NOTCH_Y + margin or y > H - NOTCH_Y - margin
+    return not (in_x_notch and in_y_notch)
 
 
 def mm(v):
@@ -145,14 +163,14 @@ def line(board, layer, a, b, width=0.1):
     board.Add(s)
 
 
-def zone(board, layer, corners, net=None, keepout=False, name="", tracks_only=False):
+def zone(board, layer, corners, net=None, keepout=False, name="", tracks_only=False, allow_pour=None):
     z = pcbnew.ZONE(board)
     z.SetLayer(layer)
     if keepout:
         z.SetIsRuleArea(True)
         z.SetDoNotAllowTracks(True)
         z.SetDoNotAllowVias(not tracks_only)
-        z.SetDoNotAllowZoneFills(not tracks_only)
+        z.SetDoNotAllowZoneFills(not (tracks_only if allow_pour is None else allow_pour))
         z.SetDoNotAllowPads(False)
         z.SetDoNotAllowFootprints(False)
         z.SetLayerSet(pcbnew.LSET.AllCuMask())
@@ -240,19 +258,26 @@ def build_board():
         board.Add(fp)
 
     # outline
-    corners = [(0, 0), (W, 0), (W, H), (0, H)]
-    for a, b in zip(corners, corners[1:] + corners[:1]):
+    for a, b in zip(OUTLINE, OUTLINE[1:] + OUTLINE[:1]):
         line(board, pcbnew.Edge_Cuts, a, b, 0.1)
 
     # Antenna keep-out, all layers. Espressif (ESP32-C6 PCB layout guidelines):
     # >=15 mm clear beside the antenna, module top at the board edge.
-    ux, uy, _ = PLACE["U1"]
+    ux, uy = UX, UY
     ant_bottom = uy - 9.0                 # antenna region ends ~9.75 mm above the origin
-    zone(board, pcbnew.F_Cu, [(ux - 9.0 - 15.0, 0), (W, 0), (W, ant_bottom), (ux - 9.0 - 15.0, ant_bottom)],
+    zone(board, pcbnew.F_Cu, [(ux - 9.0 - 15.0, 0), (W - NOTCH_X, 0), (W - NOTCH_X, ant_bottom),
+                              (ux - 9.0 - 15.0, ant_bottom)],
          keepout=True, name="ANTENNA_KEEPOUT")
     # No tracks under the module body (pour and vias allowed), so signals escape outward
-    zone(board, pcbnew.F_Cu, [(ux - 7.5, ant_bottom), (ux + 7.5, ant_bottom), (ux + 7.5, uy + 8.0),
-                              (ux - 7.5, uy + 8.0)], keepout=True, tracks_only=True, name="MODULE_NO_TRACKS")
+    zone(board, pcbnew.F_Cu, [(ux - 7.6, ant_bottom), (ux + 7.6, ant_bottom), (ux + 7.6, uy + 9.75),
+                              (ux - 7.6, uy + 9.75)], keepout=True, tracks_only=True, name="MODULE_NO_TRACKS")
+    # No tracks or vias under screw heads / standoffs (r 3.5 mm); GND pour allowed
+    for ref, (hx, hy, _) in PLACE.items():
+        if ref.startswith("H"):
+            r = 3.5
+            octagon = [(hx + r * math.cos(math.radians(22.5 + 45 * k)), hy + r * math.sin(math.radians(22.5 + 45 * k)))
+                       for k in range(8)]
+            zone(board, pcbnew.F_Cu, octagon, keepout=True, allow_pour=True, name=f"{ref}_KEEPOUT")
 
     # Decoupling: C6 then C5 straight onto U1 pin 2, locked so the router keeps it
     fps = {f.GetReference(): f for f in board.GetFootprints()}
@@ -377,20 +402,21 @@ def in_rect(pos, r):
 
 
 def no_via_zones():
-    ux, uy, _ = PLACE["U1"]
-    keep = [(ux - 24.5, 0, W, uy - 8.4)]                       # antenna keep-out (+margin)
+    keep = [(UX - 24.5, 0, W, UY - 8.4)]                       # antenna keep-out (+margin)
     for ref in ("J1", "J2", "J4", "K1", "SW1", "J3"):          # THT bodies and the USB shell
         x, y, _ = PLACE[ref]
         keep.append({"J1": (x - 3.5, y - 5.6, x + 18.7, H), "J2": (x - 3.5, y - 5.6, x + 18.7, H),
                      "J4": (x - 5.5, y - 5.6, x + 5.5, H), "K1": (x - 2.0, y - 2.0, x + 7.0, y + 15.0),
                      "SW1": (x - 4.0, y - 3.2, x + 8.0, y + 2.8), "J3": (x - 1.6, y - 1.6, x + 1.6, y + 19.4)}[ref])
+    for ref, (hx, hy, _) in PLACE.items():
+        if ref.startswith("H"):
+            keep.append((hx - 3.6, hy - 3.6, hx + 3.6, hy + 3.6))
     return keep
 
 
 def pour_and_stitch(board, netinfo):
     gnd = netinfo["/GND"]
-    outline = [(0.3, 0.3), (W - 0.3, 0.3), (W - 0.3, H - 0.3), (0.3, H - 0.3)]
-    zones = [zone(board, layer, outline, net=gnd, name="GND") for layer in (pcbnew.F_Cu, pcbnew.B_Cu)]
+    zones = [zone(board, layer, OUTLINE, net=gnd, name="GND") for layer in (pcbnew.F_Cu, pcbnew.B_Cu)]
     # EPAD vias in the gaps of the module's 3x3 ground-pad grid (after routing:
     # the session import replaces all vias)
     u1 = [f for f in board.GetFootprints() if f.GetReference() == "U1"][0]
@@ -418,7 +444,8 @@ def pour_and_stitch(board, netinfo):
             for k in range(16):
                 a = math.radians(k * 22.5)
                 pos = pcbnew.VECTOR2I(int(c.x + r * math.cos(a)), int(c.y + r * math.sin(a)))
-                if (any(in_rect(pos, z) for z in keep) or not in_rect(pos, (1.2, 1.2, W - 1.2, H - 1.2))
+                if (any(in_rect(pos, z) for z in keep)
+                        or not on_board(pcbnew.ToMM(pos.x) - OX, pcbnew.ToMM(pos.y) - OY)
                         or not clear_of_copper(board, pos, gnd, 0.3)):
                     continue
                 t = pcbnew.PCB_TRACK(board)
@@ -439,9 +466,9 @@ def pour_and_stitch(board, netinfo):
     # 2. Stitching grid (4 mm) wherever both layers are GND-filled, plus a fence
     #    along the antenna keep-out's lower edge
     filler.Fill(board.Zones())
-    ux, uy, _ = PLACE["U1"]
-    pts = [(x, y) for x in frange(2.0, W - 2.0, 4.0) for y in frange(2.0, H - 2.0, 4.0)]
-    pts += [(x, uy - 8.1) for x in frange(ux - 24.0, ux - 9.5, 1.5)]
+    pts = [(x, y) for x in frange(2.0, W - 2.0, 4.0) for y in frange(2.0, H - 2.0, 4.0)
+           if on_board(x, y, 1.5)]
+    pts += [(x, UY - 8.1) for x in frange(UX - 24.0, UX - 9.5, 1.5)]
     stitched = 0
     for x, y in pts:
         pos = pt(x, y)
@@ -460,12 +487,13 @@ def pour_and_stitch(board, netinfo):
     for z in zones:
         polys = z.GetFilledPolysList(z.GetLayer())
         for i in range(polys.OutlineCount()):
-            anchored = any(polys.Contains(t.GetPosition(), i) for t in board.GetTracks()
-                           if t.GetClass() == "PCB_VIA" and t.GetNetCode() == gnd.GetNetCode())
-            anchored = anchored or any(
-                polys.Contains(p.GetPosition(), i) for f in board.GetFootprints() for p in f.Pads()
-                if p.GetNetCode() == gnd.GetNetCode() and p.GetAttribute() == pcbnew.PAD_ATTRIB_PTH)
-            if anchored:
+            anchors = [t.GetPosition() for t in board.GetTracks()
+                       if t.GetClass() == "PCB_VIA" and t.GetNetCode() == gnd.GetNetCode()
+                       and polys.Contains(t.GetPosition(), i)]
+            anchors += [p.GetPosition() for f in board.GetFootprints() for p in f.Pads()
+                        if p.GetNetCode() == gnd.GetNetCode() and p.GetAttribute() == pcbnew.PAD_ATTRIB_PTH
+                        and polys.Contains(p.GetPosition(), i)]
+            if len(anchors) >= 2:
                 continue
             bb = polys.Outline(i).BBox()
             step = mm(0.25)
@@ -474,14 +502,18 @@ def pour_and_stitch(board, netinfo):
                 for xx in range(bb.GetLeft(), bb.GetRight(), step):
                     pos = pcbnew.VECTOR2I(xx, yy)
                     if (polys.Contains(pos, i) and all(o.HitTestFilledArea(o.GetLayer(), pos, 0) for o in zones)
+                            and not any(in_rect(pos, z) for z in keep)
+                            and all((pos - a).EuclideanNorm() > mm(1.0) for a in anchors)
                             and clear_of_copper(board, pos, gnd, 0.3, gap=0.25)):
                         add_via(board, pos, gnd)
+                        anchors.append(pos)
                         rescued += 1
-                        done = True
-                        break
+                        if len(anchors) >= 2:
+                            done = True
+                            break
                 if done:
                     break
-            if not done:
+            if not anchors:
                 print(f"  island on {z.GetLayerName()} near "
                       f"({pcbnew.ToMM(bb.GetCenter().x) - OX:.1f}, {pcbnew.ToMM(bb.GetCenter().y) - OY:.1f}) has no via")
     filler.Fill(board.Zones())
