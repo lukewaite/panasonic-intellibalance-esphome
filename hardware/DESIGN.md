@@ -239,6 +239,37 @@ Firmware must set `esp32: flash_size: 8MB`; ESPHome otherwise assumes a 4 MB par
   (GND 3V3 pRX eRX eTX pTX dRX dTX), the SW1 positions (AUTO / PASS — verify with a meter that the
   AUTO side connects pins 1–2), JP1 ("NOT WITH USB") and the EN/BOOT pads.
 
+## Enclosure — Hammond 1591C
+
+- Box: **Hammond 1591C** ABS, ~120 × 65 × 36 mm outside (+ lid), e.g. 1591CSBK (black) or
+  1591CSGY (grey); inside 112.05 × 57.24 mm at the card guides
+  ([drawing](https://www.hammfg.com/pdf/1591C.pdf)). Plastic, so the antenna works through it.
+- The board is 110 × 56 mm, centred in the box. Its 7 × 7.5 mm corner notches clear the four
+  Ø8.65 mm lid-screw bosses (106.65 × 51.65 mm grid).
+- Mount on four **M3 × 12 mm standoffs** (nylon preferred near the antenna), screwed through holes
+  drilled in the box floor. Drill template: the board itself, or the H1–H4 positions below.
+- All cables enter through the **long wall next to the screw terminals**.
+
+Drilling guide, measured from the outside of the box. "From left" is from the left end of that
+long wall as you face it from outside (J1 is on the left). Heights assume a ~2 mm floor and 12 mm
+standoffs (board top ≈ 15.6 mm above the outside bottom) — **check the floor thickness on the
+real box and adjust**.
+
+| Hole | From left | Height | Size | Purpose |
+|---|---|---|---|---|
+| A | 22.6 mm | ~18 mm | Ø8–10 mm (or grommet) | thermostat cable from the ERV → J1 |
+| B | 48.6 mm | ~18 mm | Ø8–10 mm (or grommet) | thermostat cable to the wall control → J2 |
+| C | 95.0 mm | ~17 mm (centre) | 12 × 7 mm slot | USB-C plug |
+
+Floor holes for the standoffs (board coordinates + 5 mm in length, + 4.5 mm in width, from the
+outside left/back corner as seen from above with the cable wall at the front): H1 (15.5, 8.5),
+H2 (111.5, 36.0), H3 (8.8, 44.5), H4 (111.5, 46.5) mm. Easiest: lay the bare board in the box and
+mark through its holes.
+
+With the box sitting on the ERV, the antenna is only ~15 mm above the metal lid (floor +
+standoffs). Lift the box on its own small feet or a spacer if reception is weak, and point the
+antenna end of the box toward the border router.
+
 ## BOM (rev A)
 
 JLCPCB part numbers checked 2026-10-10. "Basic" parts carry no per-type fee in Economic PCBA.
