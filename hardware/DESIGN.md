@@ -315,21 +315,23 @@ Ordering notes:
 
 ## Bring-up
 
-Order of operations, each step safe to stop at:
+Order of operations, each step safe to stop at. [STATUS.md](STATUS.md) has the hands-on checklist.
 
-1. **Bench, no ERV.** Power from USB. Check 5 V/3.3 V, flash over USB, relay clicks on GPIO11,
+1. **Solder and meter-check, unpowered.** J1↔J2 continuity through the relay's NC contacts, no
+   shorts, and which SW1 side is AUTO.
+2. **Install unpowered, capture.** No USB, no firmware: the relay rests in passthrough. The system
+   must work exactly as before, which proves the NC path and that the taps don't load the link.
+   Capture pRX/eRX/eTX/pTX on J3 with the Saleae. eTX's level, at the ERV end on a clean ground,
+   settles the 2.3 V question and the R<sub>u2</sub>/R<sub>p2</sub> choice; if it is well above
+   2.3 V, revisit the TXD tap reference before powering.
+3. **Bench, no ERV.** Power from USB. Check 5 V/3.3 V, flash over USB, relay clicks on GPIO11,
    SW1 overrides it, LED2 follows. **Hold EN low (reset) and confirm the relay stays off** and both
-   driver drains sit high. Scope the 3.3 V rail during WiFi/Thread transmit for LDO stability. Feed each tap from a bench supply: comparator flips at the
-   tabled thresholds.
-2. **Install in passthrough, firmware idle (relay never energised).** Wire J1 → ERV, wall control
-   → J2. The system must work exactly as before. This proves the relay's NC path and that the taps
-   don't load the link.
-3. **Passive firmware.** Both UARTs should decode with 100 % BCC/parity, like `tools/decode.py`
-   does. Publish every register change to Home Assistant. **This is the register-mapping tool:**
-   use the wall control normally, read the history.
-4. **Measure, still in passthrough.** Use J3 to capture the levels with the Saleae. Then
-   briefly unplug the wall control and capture ERV TXD open-circuit. That settles where the
-   2.3 V comes from and the R<sub>u2</sub>/R<sub>p2</sub> choice.
+   driver drains sit high. Scope the 3.3 V rail during Thread transmit for LDO stability. Feed each
+   tap from a bench supply: comparator flips at the tabled thresholds.
+4. **Passive firmware on the ERV.** Both UARTs should decode with 100 % BCC/parity, like
+   `tools/decode.py` does. Publish every register change to Home Assistant. **This is the
+   register-mapping tool:** use the wall control normally, read the history. Optionally unplug the
+   wall control briefly and capture ERV TXD open-circuit.
 5. **Intercept, forward-only.** The ESP re-sends every frame it receives, unchanged. Both ends
    must behave identically to passthrough. If one shows a fault, fit the dummy loads.
 6. **Intercept, inject.** Replace RXD `00` with the known On/Off command (`10303000`) for
@@ -346,9 +348,9 @@ Order of operations, each step safe to stop at:
 
 ## Open items
 
-- Real driven level on TXD (bring-up step 4). This sets R<sub>u2</sub>/R<sub>p2</sub> and possibly the
+- Real driven level on TXD (bring-up step 2). This sets R<sub>u2</sub>/R<sub>p2</sub> and possibly the
   TXD reference.
 - Whether either end notices the other missing in intercept (bring-up step 5).
-- Relay choice (footprint) and the exact basic-part numbers for LEDs, resistors and capacitors.
+- Which SW1 side is AUTO (meter, bring-up step 1); AMS1117 stability with ceramic caps (step 3).
 - The ERV's 5 V current budget. Only matters if JP1 is ever used.
 - ERV-side wiring: confirm the ERV's terminal block takes a short 4-wire jumper to J1.
