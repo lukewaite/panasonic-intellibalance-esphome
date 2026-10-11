@@ -309,11 +309,9 @@ Ordering notes:
   leave mouse-bite stubs. The board has only ~0.6 mm per side of clearance across the box width,
   so ask for tabs on the **short (56 mm) edges only**, or sand any long-edge stubs flush before
   fitting it in the box.
-- **Rotations:** check every part's pin 1 in JLCPCB's placement preview. Likely corrections
-  (community tables, not verified): SOIC-8 U2 +270°, SOT-223 U3 +180°, SOT-23 Q1–Q3 180°, USB-C
-  J4 180° (opening must face the bottom edge), U1 probably 0° (antenna toward the top edge),
-  diodes/LEDs 0° or 180° (cathode mark), 0805 R/C 0°.
-- The CPL already shifts U1 by 3 mm to its body centre, which JLCPCB places on.
+- **Rotations and offsets** are corrected in `gen_fab.py` (`CPL_ROT`, `CPL_OFFSET`), measured
+  against JLCPCB's preview: U2 +270°, U3 +180°, Q1–Q3 +180°, J4 shifted 1.4 mm inward. U1, the
+  diodes, the LEDs and the passives needed nothing. Still check pin 1 in the preview.
 
 ## Bring-up
 

@@ -19,9 +19,14 @@ FAB = os.path.join(PROJ, "fab")
 BUILD = os.path.join(PROJ, "build")
 CLI = "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"
 PCB = os.path.join(PROJ, "ervlink.kicad_pcb")
-# JLCPCB places on the body centre. The WROOM footprint origin is the pad-grid
-# centre; the body centre is 3 mm toward the antenna (CPL Y is page Y negated).
-CPL_OFFSET = {"U1": (0.0, 3.0)}
+# Corrections measured against JLCPCB's placement preview (2026-10-10). Their part
+# models don't share KiCad's origin/rotation for these footprints.
+# Offset is in CPL axes (Y up). J4: their model's locating pegs sat 1.4 mm below
+# the board's NPTH holes. U1 needs none: their model origin is the pad-grid centre.
+CPL_OFFSET = {"J4": (0.0, 1.4)}
+# Rotation added to KiCad's, degrees CCW. U2 pin 1 bottom-left -> top-left;
+# U3 and the SOT-23s had pin 1 diagonally opposite.
+CPL_ROT = {"U2": 270, "U3": 180, "Q1": 180, "Q2": 180, "Q3": 180}
 
 
 def run(*args):
@@ -62,7 +67,7 @@ def main():
             if row["Ref"] in parts:
                 dx, dy = CPL_OFFSET.get(row["Ref"], (0.0, 0.0))
                 w.writerow([row["Ref"], f"{float(row['PosX']) + dx:.4f}mm", f"{float(row['PosY']) + dy:.4f}mm", "Top",
-                            str(int(round(float(row["Rot"])))) ])
+                            str((int(round(float(row["Rot"]))) + CPL_ROT.get(row["Ref"], 0)) % 360)])
 
     groups = defaultdict(list)
     for ref, key in parts.items():
