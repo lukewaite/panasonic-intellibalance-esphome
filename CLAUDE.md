@@ -220,8 +220,11 @@ Each command register on RXD has a matching state register on TXD (`x0` → `x1`
 | `20` → `21` | boost (1 on) | 0 | 0 | 0 |
 | — → `B1` | inside temp °C | inside %RH | outside temp °C | outside %RH |
 
-- **Airflow code:** CFM = 50 + 10 × code, seen at 1 (60, the menu minimum), 3, 7, 9 and 13 (180).
-  The menu goes from 180 straight to **200 = code 16**; 14 and 15 have never appeared.
+- **Airflow code:** the wall control steps airflow in 20 CFM: 60, 80, … 180, 200. Those are codes
+  1, 3, 5, 7, 9, 11, 13 (CFM = 50 + 10 × code) and then **200 = code 16**, not 15. Seen on the bus:
+  1, 3, 7, 9, 13, 16. Even codes and 14/15 are never sent by the panel; whether the ERV accepts
+  them is untested.
+- **ASHRAE:** set in 10 min/h steps; the byte is the value in tens (seen 1, 2, 3).
 - **`B1`**: outside temp/RH matched the display three times (2025-12-14: 3 °C/85 %; 2026-10-29:
   15 °C/75 %, 14 °C/76 %). Inside values (19–20 °C, 29–48 %) are plausible against other house
   sensors but the wall control never shows them. Sub-zero encoding (assumed signed) unseen.
@@ -236,8 +239,8 @@ Each command register on RXD has a matching state register on TXD (`x0` → `x1`
   past it: supply, then exhaust, even if unchanged). A short Filter press sends nothing.
 
 Still unknown: `30`/`F0` commands and `31`/`A1`/`F1` state never changed (`F1 = 00003E00`
-throughout); the 3 s Filter reset, a boost timing out on its own, sub-zero outside temps, and
-whether the airflow menu steps by 10 or 20 CFM.
+throughout); the 3 s Filter reset, a boost timing out on its own, sub-zero outside temps, the
+ASHRAE range, and the confirmation of the inside `B1` values against the display.
 
 ## Superseded claims from the first attempt
 
