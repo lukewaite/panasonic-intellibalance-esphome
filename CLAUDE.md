@@ -225,9 +225,10 @@ Each command register on RXD has a matching state register on TXD (`x0` → `x1`
   1, 3, 7, 9, 13, 16. Even codes and 14/15 are never sent by the panel; whether the ERV accepts
   them is untested.
 - **ASHRAE:** set in 10 min/h steps; the byte is the value in tens (seen 1, 2, 3).
-- **`B1`**: outside temp/RH matched the display three times (2025-12-14: 3 °C/85 %; 2026-10-29:
-  15 °C/75 %, 14 °C/76 %). Inside values (19–20 °C, 29–48 %) are plausible against other house
-  sensors but the wall control never shows them. Sub-zero encoding (assumed signed) unseen.
+- **`B1`**: all four fields confirmed against the display. Outside: 2025-12-14 3 °C/85 %;
+  2026-10-29 15 °C/75 %, 14 °C/76 %. Inside (In/Out button): 2026-10-29 66 °F/48 % = `13 30`
+  (19 °C/48 %). Whole degrees Celsius; the panel converts to °F. Sub-zero encoding (assumed
+  signed) unseen.
 - **Commands:** `FF` = leave this byte alone. Each byte is held for 3 cycles (~0.6 s) on its own,
   so fields edited in quick succession overlap within one frame. The ERV applies a command within
   0.2–0.4 s of its first frame.
@@ -240,7 +241,7 @@ Each command register on RXD has a matching state register on TXD (`x0` → `x1`
 
 Still unknown: `30`/`F0` commands and `31`/`A1`/`F1` state never changed (`F1 = 00003E00`
 throughout); the 3 s Filter reset, a boost timing out on its own, sub-zero outside temps, the
-ASHRAE range, and the confirmation of the inside `B1` values against the display.
+and the ASHRAE range.
 
 ## Superseded claims from the first attempt
 

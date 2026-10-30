@@ -249,8 +249,8 @@ sensor:
   # length in tens of minutes, non-zero only while boost runs (not time remaining).
   - {platform: template, id: ashrae, name: "ASHRAE run time", unit_of_measurement: "min/h", accuracy_decimals: 0, update_interval: never}
   - {platform: template, id: boost_duration, name: "Boost duration", device_class: duration, unit_of_measurement: "min", accuracy_decimals: 0, update_interval: never}
-  # TXD B1: inside temp, inside RH, outside temp, outside RH. Inside values are unconfirmed
-  # (the wall control doesn't show them); temps assumed signed for sub-zero readings.
+  # TXD B1: inside temp, inside RH, outside temp, outside RH (all confirmed against the
+  # display). Temps assumed signed for sub-zero readings; not yet seen.
   - {platform: template, id: inside_temp, name: "Inside temperature", device_class: temperature, unit_of_measurement: "°C", state_class: measurement, accuracy_decimals: 0, update_interval: never}
   - {platform: template, id: inside_rh, name: "Inside humidity", device_class: humidity, unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, update_interval: never}
   - {platform: template, id: outside_temp, name: "Outside temperature", device_class: temperature, unit_of_measurement: "°C", state_class: measurement, accuracy_decimals: 0, update_interval: never}
