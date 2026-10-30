@@ -550,20 +550,22 @@ select:
       - lambda: id(req_ashrae) = atoi(x.c_str()) / 10;
 
 text_sensor:
-  # Raw registers: ground truth, but noisy in HA's logbook. Disabled by default; enable
-  # them in HA (or watch the device log) when decoding something new.
+  # Raw registers. The decoded ones (00/10/20, 01/11/21, B1) are disabled by default: the
+  # entities below cover them and they flood HA's logbook. Enable them, or watch the device
+  # log, when decoding something new. 30/F0/31/A1/F1 have never changed, so they stay on to
+  # catch whatever does (the 3 s Filter reset, a filter-due flag).
   - {platform: template, id: reg_rxd_00, name: "RXD 00", icon: "mdi:arrow-right-bold", entity_category: diagnostic, disabled_by_default: true}
   - {platform: template, id: reg_rxd_10, name: "RXD 10", icon: "mdi:arrow-right-bold", entity_category: diagnostic, disabled_by_default: true}
   - {platform: template, id: reg_rxd_20, name: "RXD 20", icon: "mdi:arrow-right-bold", entity_category: diagnostic, disabled_by_default: true}
-  - {platform: template, id: reg_rxd_30, name: "RXD 30", icon: "mdi:arrow-right-bold", entity_category: diagnostic, disabled_by_default: true}
-  - {platform: template, id: reg_rxd_f0, name: "RXD F0", icon: "mdi:arrow-right-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_rxd_30, name: "RXD 30", icon: "mdi:arrow-right-bold", entity_category: diagnostic}
+  - {platform: template, id: reg_rxd_f0, name: "RXD F0", icon: "mdi:arrow-right-bold", entity_category: diagnostic}
   - {platform: template, id: reg_txd_01, name: "TXD 01", icon: "mdi:arrow-left-bold", entity_category: diagnostic, disabled_by_default: true}
   - {platform: template, id: reg_txd_11, name: "TXD 11", icon: "mdi:arrow-left-bold", entity_category: diagnostic, disabled_by_default: true}
   - {platform: template, id: reg_txd_21, name: "TXD 21", icon: "mdi:arrow-left-bold", entity_category: diagnostic, disabled_by_default: true}
-  - {platform: template, id: reg_txd_31, name: "TXD 31", icon: "mdi:arrow-left-bold", entity_category: diagnostic, disabled_by_default: true}
-  - {platform: template, id: reg_txd_a1, name: "TXD A1", icon: "mdi:arrow-left-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_txd_31, name: "TXD 31", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
+  - {platform: template, id: reg_txd_a1, name: "TXD A1", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
   - {platform: template, id: reg_txd_b1, name: "TXD B1", icon: "mdi:arrow-left-bold", entity_category: diagnostic, disabled_by_default: true}
-  - {platform: template, id: reg_txd_f1, name: "TXD F1", icon: "mdi:arrow-left-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_txd_f1, name: "TXD F1", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
   - platform: template
     id: reg_unknown
     name: "Unexpected register"
