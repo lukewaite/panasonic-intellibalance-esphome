@@ -12,6 +12,9 @@
 # pull-downs keep Q2/Q3 off. GPIO11 (relay) is driven low at boot.
 #
 # Frame: 02 | A1 A0 | D7..D0 | 03 | BCC, ASCII hex, BCC = ~(XOR of A1..ETX).
+# The 8 data chars are 4 bytes, each sent LOW NIBBLE FIRST: "3103F0B4" = 13 30 0F 4B.
+# Decoded entities below rest on two observations each (2025-12-14 capture and the
+# 2026-10-29 display photo); the raw hex sensors stay as ground truth.
 # Health check: frame rates should sit near 25/s (RXD) and 19/s (TXD) with zero bad
 # frames. Anything else means the tap or the UART settings are wrong, not a noisy bus.
 #
@@ -147,10 +150,14 @@ interval:
             char want = (L.name[0] == 'R') ? '0' : '1';
             auto *s = addr[1] == want ? reg_sensor(addr) : nullptr;
             if (s == nullptr) {
-              std::string u = std::string(L.name) + " " + addr + " " + data;
-              if (id(reg_unknown).state != u) {
-                ESP_LOGW("ervlink", "unexpected register: %s", u.c_str());
-                id(reg_unknown).publish_state(u);
+              // Remember the last value per line+address so a few interleaved unknown
+              // registers are each reported once per change, not on every frame.
+              static std::map<std::string, std::string> seen;
+              std::string key = std::string(L.name) + " " + addr;
+              if (seen[key] != data) {
+                seen[key] = data;
+                ESP_LOGW("ervlink", "unexpected register: %s %s", key.c_str(), data.c_str());
+                id(reg_unknown).publish_state(key + " " + data);
               }
               return;
             }
@@ -158,10 +165,22 @@ interval:
             ESP_LOGI("ervlink", "%s %s: %s -> %s", L.name, addr.c_str(),
                      s->state.empty() ? "(none)" : s->state.c_str(), data.c_str());
             s->publish_state(data);
-            if (addr == "B1") {
-              sensor::Sensor *b[4] = {id(b1_byte0), id(b1_byte1), id(b1_byte2), id(b1_byte3)};
-              for (int i = 0; i < 4; i++)
-                b[i]->publish_state(hexval(data[2 * i]) * 16 + hexval(data[2 * i + 1]));
+
+            // Byte k is chars 2k (low nibble) and 2k+1 (high nibble).
+            uint8_t b[4];
+            for (int k = 0; k < 4; k++) b[k] = hexval(data[2 * k]) | hexval(data[2 * k + 1]) << 4;
+            auto cfm = [](uint8_t v) { return v <= 15 ? 50.0f + 10.0f * v : NAN; };
+            if (addr == "01") {
+              id(erv_power).publish_state(b[0] != 0);
+              id(airflow_supply).publish_state(cfm(b[1]));
+              id(airflow_exhaust).publish_state(cfm(b[2]));
+            } else if (addr == "11") {
+              id(ashrae).publish_state(10.0f * b[0]);
+            } else if (addr == "B1") {
+              id(inside_temp).publish_state((int8_t) b[0]);
+              id(inside_rh).publish_state(b[1]);
+              id(outside_temp).publish_state((int8_t) b[2]);
+              id(outside_rh).publish_state(b[3]);
             }
           };
 
@@ -207,12 +226,23 @@ text_sensor:
     name: "Unexpected register"
     entity_category: diagnostic
 
+binary_sensor:
+  # TXD 01 byte 0: 0 when off, 1 when on. Other values (boost? vent mode?) unknown.
+  - {platform: template, id: erv_power, name: "Power", device_class: running}
+
 sensor:
-  # B1 is the suspected sensor register; numeric bytes graph against the weather.
-  - {platform: template, id: b1_byte0, name: "TXD B1 byte 0", accuracy_decimals: 0, update_interval: never}
-  - {platform: template, id: b1_byte1, name: "TXD B1 byte 1", accuracy_decimals: 0, update_interval: never}
-  - {platform: template, id: b1_byte2, name: "TXD B1 byte 2", accuracy_decimals: 0, update_interval: never}
-  - {platform: template, id: b1_byte3, name: "TXD B1 byte 3", accuracy_decimals: 0, update_interval: never}
+  # TXD 01 bytes 1/2: CFM = 50 + 10 x value. Which byte is supply vs exhaust is a guess
+  # until the two are set differently.
+  - {platform: template, id: airflow_supply, name: "Supply airflow", unit_of_measurement: "CFM", state_class: measurement, accuracy_decimals: 0, update_interval: never}
+  - {platform: template, id: airflow_exhaust, name: "Exhaust airflow", unit_of_measurement: "CFM", state_class: measurement, accuracy_decimals: 0, update_interval: never}
+  # TXD 11 byte 0: ASHRAE run time in tens of minutes per hour.
+  - {platform: template, id: ashrae, name: "ASHRAE run time", unit_of_measurement: "min/h", accuracy_decimals: 0, update_interval: never}
+  # TXD B1: inside temp, inside RH, outside temp, outside RH. Inside values are unconfirmed
+  # (the wall control doesn't show them); temps assumed signed for sub-zero readings.
+  - {platform: template, id: inside_temp, name: "Inside temperature", device_class: temperature, unit_of_measurement: "°C", state_class: measurement, accuracy_decimals: 0, update_interval: never}
+  - {platform: template, id: inside_rh, name: "Inside humidity", device_class: humidity, unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, update_interval: never}
+  - {platform: template, id: outside_temp, name: "Outside temperature", device_class: temperature, unit_of_measurement: "°C", state_class: measurement, accuracy_decimals: 0, update_interval: never}
+  - {platform: template, id: outside_rh, name: "Outside humidity", device_class: humidity, unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, update_interval: never}
 
   - platform: template
     name: "RXD frame rate"
