@@ -550,18 +550,20 @@ select:
       - lambda: id(req_ashrae) = atoi(x.c_str()) / 10;
 
 text_sensor:
-  - {platform: template, id: reg_rxd_00, name: "RXD 00", icon: "mdi:arrow-right-bold", entity_category: diagnostic}
-  - {platform: template, id: reg_rxd_10, name: "RXD 10", icon: "mdi:arrow-right-bold", entity_category: diagnostic}
-  - {platform: template, id: reg_rxd_20, name: "RXD 20", icon: "mdi:arrow-right-bold", entity_category: diagnostic}
-  - {platform: template, id: reg_rxd_30, name: "RXD 30", icon: "mdi:arrow-right-bold", entity_category: diagnostic}
-  - {platform: template, id: reg_rxd_f0, name: "RXD F0", icon: "mdi:arrow-right-bold", entity_category: diagnostic}
-  - {platform: template, id: reg_txd_01, name: "TXD 01", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
-  - {platform: template, id: reg_txd_11, name: "TXD 11", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
-  - {platform: template, id: reg_txd_21, name: "TXD 21", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
-  - {platform: template, id: reg_txd_31, name: "TXD 31", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
-  - {platform: template, id: reg_txd_a1, name: "TXD A1", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
-  - {platform: template, id: reg_txd_b1, name: "TXD B1", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
-  - {platform: template, id: reg_txd_f1, name: "TXD F1", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
+  # Raw registers: ground truth, but noisy in HA's logbook. Disabled by default; enable
+  # them in HA (or watch the device log) when decoding something new.
+  - {platform: template, id: reg_rxd_00, name: "RXD 00", icon: "mdi:arrow-right-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_rxd_10, name: "RXD 10", icon: "mdi:arrow-right-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_rxd_20, name: "RXD 20", icon: "mdi:arrow-right-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_rxd_30, name: "RXD 30", icon: "mdi:arrow-right-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_rxd_f0, name: "RXD F0", icon: "mdi:arrow-right-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_txd_01, name: "TXD 01", icon: "mdi:arrow-left-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_txd_11, name: "TXD 11", icon: "mdi:arrow-left-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_txd_21, name: "TXD 21", icon: "mdi:arrow-left-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_txd_31, name: "TXD 31", icon: "mdi:arrow-left-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_txd_a1, name: "TXD A1", icon: "mdi:arrow-left-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_txd_b1, name: "TXD B1", icon: "mdi:arrow-left-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_txd_f1, name: "TXD F1", icon: "mdi:arrow-left-bold", entity_category: diagnostic, disabled_by_default: true}
   - platform: template
     id: reg_unknown
     name: "Unexpected register"
@@ -617,6 +619,6 @@ sensor:
       return r;
   - {platform: template, name: "RXD bad frames", lambda: "return id(rxd_bad);", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, update_interval: 10s}
   - {platform: template, name: "TXD bad frames", lambda: "return id(txd_bad);", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, update_interval: 10s}
-  - {platform: template, name: "RXD junk bytes", lambda: "return id(rxd_junk);", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, update_interval: 10s}
-  - {platform: template, name: "TXD junk bytes", lambda: "return id(txd_junk);", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, update_interval: 10s}
+  - {platform: template, name: "RXD junk bytes", lambda: "return id(rxd_junk);", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, disabled_by_default: true, update_interval: 10s}
+  - {platform: template, name: "TXD junk bytes", lambda: "return id(txd_junk);", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, disabled_by_default: true, update_interval: 10s}
   - {platform: uptime, name: "Uptime", entity_category: diagnostic}
