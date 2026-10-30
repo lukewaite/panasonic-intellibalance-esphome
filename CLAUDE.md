@@ -243,7 +243,7 @@ Each command register on RXD has a matching state register on TXD (`x0` → `x1`
   past it: supply, then exhaust, even if unchanged). A short Filter press sends nothing.
 
 Still unknown: `30`/`F0` commands and `31`/`A1`/`F1` state never changed (`F1 = 00003E00`
-throughout); the 3 s Filter reset, sub-zero outside temps, the
+throughout); the 3 s Filter reset, sub-zero outside temps
 and the ASHRAE range.
 
 ## Superseded claims from the first attempt

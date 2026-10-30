@@ -3,7 +3,7 @@
 **Start here when parts or boards arrive.** Design rationale is in [DESIGN.md](DESIGN.md); this
 file is what's ordered, what to check on arrival, and the bring-up procedure in the order to do it.
 
-Last updated 2026-10-29. Branch `hardware-rev-a`.
+Last updated 2026-10-30. Branch `hardware-rev-a`.
 
 ## Orders (placed 2026-10-10)
 
@@ -42,7 +42,8 @@ a short 4-conductor thermostat-wire jumper from the ERV terminals to J1.
   decodes both lines cleanly, so it is not needed to listen. Still needed **before intercept**:
   eTX/pTX levels set R24/R25 (the driver's high level towards the wall control).
 - **Bench checks (step 5)** not done: relay click, SW1 override, EN-low relay-off, 3.3 V under
-  Thread transmit. SW1 is not fitted on the installed board, so the relay cannot energise.
+  Thread transmit. SW1 is now fitted and set to AUTO, so only the firmware (GPIO11, held off at
+  boot) keeps the relay in passthrough.
 - **`tools/decode.py` takes two channels named `RXD` and `TXD`.** The bring-up capture has four
   (both sides of each line). Either export/decode one pair at a time (name the pair RXD/TXD), or
   extend the tool to take a channel mapping.
@@ -55,8 +56,11 @@ a short 4-conductor thermostat-wire jumper from the ERV terminals to J1.
 
 - All THT parts fitted except **SW1** (left off on purpose: with SW1 out the coil has no supply,
   so the board is passthrough-only whatever the firmware does). SW1 orientation does not matter:
-  the footprint is symmetric and pin 3 is unconnected; turning it round only swaps which slider
-  position is AUTO. Meter-check pins 1–2 against the silkscreen after fitting.
+  the middle pin is common and the slider joins it to the outer pin on the side it is pushed
+  towards (checked on the part). Pin 1 (+5V) is the outer pin on the AUTO side of the layout, so
+  the silkscreen is right either way round.
+- 2026-10-30: SW1 fitted and set to **AUTO**. Not yet mounted in the box: the 1591C floor needs
+  the five standoff holes drilled (DESIGN.md "Enclosure"); the standoffs are nylon, so don't glue.
 - Installed unpowered: the wall control worked exactly as before (passthrough proven).
 - **Wire the data lines crossed** — the ERV's and the wall control's `TXD` terminal goes to the
   board's `RXD`, and vice versa, on both J1 and J2. Label-to-label puts the commands on the TXD
