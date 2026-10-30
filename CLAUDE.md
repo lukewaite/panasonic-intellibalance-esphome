@@ -204,22 +204,40 @@ State line (TXD):
 | `B1` | `41D13055` | `41D13055` |
 | `F1` | `00003E00` | `00003E00` |
 
-## Hypotheses — NOT yet confirmed
+### Register map (decoded 2026-10-29)
 
-Treat everything in this section as unproven. The transport is solved; the semantics are not.
+**Data bytes are sent low nibble first.** The 8 ASCII chars are 4 bytes, each as two hex chars,
+low nibble then high nibble: `"3103F0B4"` = `13 30 0F 4B`. Below, bytes are written as values.
+Established from a display photo plus a timestamped button session through the rev A board:
+`captures/2026-10-29/2026-10-29-notes.md` has every command and state change.
 
-- `B1` is the **sensor register**. Operator noted outside temp 37 °F and outside humidity 85 %RH.
-  `B1 = 41 D1 30 55` and **`0x55 = 85`** matches outside RH exactly. Speculative reading of the
-  rest: `0x41 = 65` (inside temp °F?), `0x30 = 48` (inside RH %?), `0xD1 = 209` (outside temp in
-  some offset/signed encoding? 37 °F = 2.78 °C does not fall out of this cleanly).
-  One matching byte is not proof — could be coincidence.
-- `00`/`01` byte layout `10 30 30 00`: the **two equal `0x30` bytes** are suggestive of supply and
-  exhaust airflow, which the operator noted as 80 cfm / 80 cfm. But `0x30 = 48`, not 80, so any
-  mapping is unknown (percent of max? speed index? something else). Byte 0 `0x10` is probably a
-  mode/on flag.
-- `0xFF` in a command byte may mean "no change / don't care" — consistent with the idle pattern
-  and with `10` sending `20FF0000` while the resulting state is `20000000`.
-- `F1 = 00003E00`, `0x3E = 62` — unexplained. ASHRAE setting was 20, so this is not it directly.
+Each command register on RXD has a matching state register on TXD (`x0` → `x1`):
+
+| Cmd → state | Byte 0 | Byte 1 | Byte 2 | Byte 3 |
+|---|---|---|---|---|
+| `00` → `01` | power (0 off, 1 on) | supply airflow code | exhaust airflow code | 0 |
+| `10` → `11` | ASHRAE, tens of min/h | boost length, tens of min (state: non-zero only while boosting) | 0 | 0 |
+| `20` → `21` | boost (1 on) | 0 | 0 | 0 |
+| — → `B1` | inside temp °C | inside %RH | outside temp °C | outside %RH |
+
+- **Airflow code:** CFM = 50 + 10 × code, seen at 1 (60, the menu minimum), 3, 7, 9 and 13 (180).
+  The menu goes from 180 straight to **200 = code 16**; 14 and 15 have never appeared.
+- **`B1`**: outside temp/RH matched the display three times (2025-12-14: 3 °C/85 %; 2026-10-29:
+  15 °C/75 %, 14 °C/76 %). Inside values (19–20 °C, 29–48 %) are plausible against other house
+  sensors but the wall control never shows them. Sub-zero encoding (assumed signed) unseen.
+- **Commands:** `FF` = leave this byte alone. Each byte is held for 3 cycles (~0.6 s) on its own,
+  so fields edited in quick succession overlap within one frame. The ERV applies a command within
+  0.2–0.4 s of its first frame.
+- **The wall control owns the settings.** While off, the ERV zeroes `01` and `11`. Turning on, and
+  cancelling boost, makes the panel re-send a full snapshot (`00 = 10707000`, `10 = 30..`,
+  `20 = 00`); the ERV does not restore airflow after boost on its own. Boost's countdown runs only
+  on the panel (`11`/`21` stay constant during it).
+- **UI-only buttons:** Vent opens the airflow editor (each field sends its command when you move
+  past it: supply, then exhaust, even if unchanged). A short Filter press sends nothing.
+
+Still unknown: `30`/`F0` commands and `31`/`A1`/`F1` state never changed (`F1 = 00003E00`
+throughout); the 3 s Filter reset, a boost timing out on its own, sub-zero outside temps, and
+whether the airflow menu steps by 10 or 20 CFM.
 
 ## Superseded claims from the first attempt
 

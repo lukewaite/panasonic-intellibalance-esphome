@@ -13,8 +13,8 @@
 #
 # Frame: 02 | A1 A0 | D7..D0 | 03 | BCC, ASCII hex, BCC = ~(XOR of A1..ETX).
 # The 8 data chars are 4 bytes, each sent LOW NIBBLE FIRST: "3103F0B4" = 13 30 0F 4B.
-# Decoded entities below rest on two observations each (2025-12-14 capture and the
-# 2026-10-29 display photo); the raw hex sensors stay as ground truth.
+# Decoded entities follow the 2026-10-29 button session (CLAUDE.md "Register map");
+# the raw hex sensors stay as ground truth.
 # Health check: frame rates should sit near 25/s (RXD) and 19/s (TXD) with zero bad
 # frames. Anything else means the tap or the UART settings are wrong, not a noisy bus.
 #
@@ -169,13 +169,22 @@ interval:
             // Byte k is chars 2k (low nibble) and 2k+1 (high nibble).
             uint8_t b[4];
             for (int k = 0; k < 4; k++) b[k] = hexval(data[2 * k]) | hexval(data[2 * k + 1]) << 4;
-            auto cfm = [](uint8_t v) { return v <= 15 ? 50.0f + 10.0f * v : NAN; };
+            // Airflow code: 50 + 10 x v up to 13 (180 CFM); the menu then jumps to 200,
+            // which is code 16. 14 and 15 have never been seen.
+            auto cfm = [](uint8_t v) { return v <= 13 ? 50.0f + 10.0f * v : v == 16 ? 200.0f : NAN; };
+            // While off the ERV zeroes 01 and 11, so their values mean nothing then.
+            static bool on = false;
             if (addr == "01") {
-              id(erv_power).publish_state(b[0] != 0);
-              id(airflow_supply).publish_state(cfm(b[1]));
-              id(airflow_exhaust).publish_state(cfm(b[2]));
+              on = b[0] != 0;
+              id(erv_power).publish_state(on);
+              id(airflow_supply).publish_state(on ? cfm(b[1]) : NAN);
+              id(airflow_exhaust).publish_state(on ? cfm(b[2]) : NAN);
+              if (!on) id(ashrae).publish_state(NAN);
             } else if (addr == "11") {
-              id(ashrae).publish_state(10.0f * b[0]);
+              id(ashrae).publish_state(on ? 10.0f * b[0] : NAN);
+              id(boost_duration).publish_state(b[1] ? 10.0f * b[1] : NAN);
+            } else if (addr == "21") {
+              id(boost).publish_state(b[0] != 0);
             } else if (addr == "B1") {
               id(inside_temp).publish_state((int8_t) b[0]);
               id(inside_rh).publish_state(b[1]);
@@ -209,34 +218,37 @@ interval:
           }
 
 text_sensor:
-  - {platform: template, id: reg_rxd_00, name: "RXD 00", icon: "mdi:arrow-right-bold"}
-  - {platform: template, id: reg_rxd_10, name: "RXD 10", icon: "mdi:arrow-right-bold"}
-  - {platform: template, id: reg_rxd_20, name: "RXD 20", icon: "mdi:arrow-right-bold"}
-  - {platform: template, id: reg_rxd_30, name: "RXD 30", icon: "mdi:arrow-right-bold"}
-  - {platform: template, id: reg_rxd_f0, name: "RXD F0", icon: "mdi:arrow-right-bold"}
-  - {platform: template, id: reg_txd_01, name: "TXD 01", icon: "mdi:arrow-left-bold"}
-  - {platform: template, id: reg_txd_11, name: "TXD 11", icon: "mdi:arrow-left-bold"}
-  - {platform: template, id: reg_txd_21, name: "TXD 21", icon: "mdi:arrow-left-bold"}
-  - {platform: template, id: reg_txd_31, name: "TXD 31", icon: "mdi:arrow-left-bold"}
-  - {platform: template, id: reg_txd_a1, name: "TXD A1", icon: "mdi:arrow-left-bold"}
-  - {platform: template, id: reg_txd_b1, name: "TXD B1", icon: "mdi:arrow-left-bold"}
-  - {platform: template, id: reg_txd_f1, name: "TXD F1", icon: "mdi:arrow-left-bold"}
+  - {platform: template, id: reg_rxd_00, name: "RXD 00", icon: "mdi:arrow-right-bold", entity_category: diagnostic}
+  - {platform: template, id: reg_rxd_10, name: "RXD 10", icon: "mdi:arrow-right-bold", entity_category: diagnostic}
+  - {platform: template, id: reg_rxd_20, name: "RXD 20", icon: "mdi:arrow-right-bold", entity_category: diagnostic}
+  - {platform: template, id: reg_rxd_30, name: "RXD 30", icon: "mdi:arrow-right-bold", entity_category: diagnostic}
+  - {platform: template, id: reg_rxd_f0, name: "RXD F0", icon: "mdi:arrow-right-bold", entity_category: diagnostic}
+  - {platform: template, id: reg_txd_01, name: "TXD 01", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
+  - {platform: template, id: reg_txd_11, name: "TXD 11", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
+  - {platform: template, id: reg_txd_21, name: "TXD 21", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
+  - {platform: template, id: reg_txd_31, name: "TXD 31", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
+  - {platform: template, id: reg_txd_a1, name: "TXD A1", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
+  - {platform: template, id: reg_txd_b1, name: "TXD B1", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
+  - {platform: template, id: reg_txd_f1, name: "TXD F1", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
   - platform: template
     id: reg_unknown
     name: "Unexpected register"
     entity_category: diagnostic
 
 binary_sensor:
-  # TXD 01 byte 0: 0 when off, 1 when on. Other values (boost? vent mode?) unknown.
+  # TXD 01 byte 0: 0 when off, 1 when on.
   - {platform: template, id: erv_power, name: "Power", device_class: running}
+  # TXD 21 byte 0: 1 while boost runs. The countdown lives in the wall control only.
+  - {platform: template, id: boost, name: "Boost", device_class: running}
 
 sensor:
-  # TXD 01 bytes 1/2: CFM = 50 + 10 x value. Which byte is supply vs exhaust is a guess
-  # until the two are set differently.
+  # TXD 01 bytes 1/2: supply, exhaust (confirmed 2026-10-29 by setting them apart).
   - {platform: template, id: airflow_supply, name: "Supply airflow", unit_of_measurement: "CFM", state_class: measurement, accuracy_decimals: 0, update_interval: never}
   - {platform: template, id: airflow_exhaust, name: "Exhaust airflow", unit_of_measurement: "CFM", state_class: measurement, accuracy_decimals: 0, update_interval: never}
-  # TXD 11 byte 0: ASHRAE run time in tens of minutes per hour.
+  # TXD 11 byte 0: ASHRAE run time in tens of minutes per hour. Byte 1: the selected boost
+  # length in tens of minutes, non-zero only while boost runs (not time remaining).
   - {platform: template, id: ashrae, name: "ASHRAE run time", unit_of_measurement: "min/h", accuracy_decimals: 0, update_interval: never}
+  - {platform: template, id: boost_duration, name: "Boost duration", device_class: duration, unit_of_measurement: "min", accuracy_decimals: 0, update_interval: never}
   # TXD B1: inside temp, inside RH, outside temp, outside RH. Inside values are unconfirmed
   # (the wall control doesn't show them); temps assumed signed for sub-zero readings.
   - {platform: template, id: inside_temp, name: "Inside temperature", device_class: temperature, unit_of_measurement: "°C", state_class: measurement, accuracy_decimals: 0, update_interval: never}
