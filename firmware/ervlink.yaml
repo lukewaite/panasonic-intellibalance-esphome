@@ -2,8 +2,8 @@
 #
 # Reads both lines of the ERV <-> wall control link through the comparator taps and
 # publishes every register to Home Assistant. The relay stays in hardware passthrough
-# except for short intercepts to send a command (v7):
-#   Power (switch), Boost/Stop boost (buttons), Supply/Exhaust airflow, ASHRAE (selects):
+# except for short intercepts to send a command (v8):
+#   Power and Boost (switches), Supply/Exhaust airflow, ASHRAE (selects):
 #     ~1.4 s each, sending the wall control's command frames for that button for 3 cycles,
 #     then 2 idle.
 #   "Intercept test" ~1 s: sends only the wall control's idle "no change" frames.
@@ -181,6 +181,7 @@ interval:
           auto publish_controls = [&]() {
             if (!power_known) return;
             id(power_switch).publish_state(on);
+            id(boost_switch).publish_state(on && boosting);
             char s[16];
             uint8_t sup = on && valid(cur_supply) ? cur_supply : id(saved_supply);
             uint8_t exh = on && valid(cur_exhaust) ? cur_exhaust : id(saved_exhaust);
@@ -495,18 +496,6 @@ interval:
           }
 
 button:
-  # Boost is always 60 min (the wall control offers no other length); the ERV times it and
-  # then restores the airflow itself. The Boost binary sensor shows whether it is running.
-  - platform: template
-    name: "Boost"
-    icon: "mdi:fan-plus"
-    on_press:
-      - lambda: id(req_boost) = 1;
-  - platform: template
-    name: "Stop boost"
-    icon: "mdi:fan-remove"
-    on_press:
-      - lambda: id(req_boost) = 0;
   - platform: template
     name: "Intercept test"
     icon: "mdi:swap-horizontal"
@@ -526,6 +515,17 @@ switch:
       - lambda: id(req_power) = 1;
     turn_off_action:
       - lambda: id(req_power) = 0;
+  # Boost is always 60 min (the wall control offers no other length); the ERV times it and
+  # then restores the airflow itself, so the switch turns itself off. Off early = cancel.
+  - platform: template
+    id: boost_switch
+    name: "Boost"
+    icon: "mdi:fan-plus"
+    restore_mode: DISABLED
+    turn_on_action:
+      - lambda: id(req_boost) = 1;
+    turn_off_action:
+      - lambda: id(req_boost) = 0;
 
 select:
   # The wall control's menu: 20 CFM steps (codes 1, 3, ... 13, then 16 for 200).
