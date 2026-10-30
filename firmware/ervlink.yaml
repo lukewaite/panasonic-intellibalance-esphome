@@ -2,12 +2,15 @@
 #
 # Reads both lines of the ERV <-> wall control link through the comparator taps and
 # publishes every register to Home Assistant. The relay stays in hardware passthrough
-# except for two short, button-triggered intercepts (v5):
-#   "Intercept test"  ~1 s: sends the wall control's idle "no change" frames to the ERV.
-#   "Turn on"         ~1.4 s: sends the turn-on snapshot the wall control sends, with the
-#                     last airflow/ASHRAE settings seen while on, then idle frames.
-# Neither forwards anything: during the intercept the ERV hears only the ESP and the wall
-# control hears nothing (its TXD input is held at the 0 V idle level).
+# except for short intercepts to send a command (v6):
+#   Power (switch), Boost/Stop boost (buttons), Supply/Exhaust airflow, ASHRAE (selects):
+#     ~1.4 s each, sending the wall control's command frames for that button for 3 cycles,
+#     then 2 idle.
+#   "Intercept test" ~1 s: sends only the wall control's idle "no change" frames.
+# Nothing is forwarded: during the intercept the ERV hears only the ESP and the wall
+# control hears nothing (its TXD input is held at the 0 V idle level). The wall control
+# shows the result anyway, as it displays the ERV's state from TXD.
+# While the ERV is off, the airflow and ASHRAE selects set what Power on will use.
 #
 #   RXD line = wall control -> ERV (commands), tapped on GPIO1, UART1, driven via GPIO10/Q2
 #   TXD line = ERV -> wall control (state),    tapped on GPIO0, UART0, driven via GPIO3/Q3
@@ -99,9 +102,15 @@ globals:
   - {id: txd_frames, type: uint32_t, initial_value: "0"}
   - {id: txd_bad, type: uint32_t, initial_value: "0"}
   - {id: txd_junk, type: uint32_t, initial_value: "0"}
-  # Intercept request from a button: 1 = test (idle frames only), 2 = turn on.
-  - {id: intercept_req, type: uint8_t, initial_value: "0"}
-  # Settings for "Turn on", saved while the ERV runs steadily without boost. Defaults are
+  # Requests from the controls, merged and sent by the interval lambda. Power/boost: -1 none,
+  # 0 off, 1 on. Supply/exhaust: airflow code, ASHRAE: tens of min/h; 0 = none.
+  - {id: req_power, type: int8_t, initial_value: "-1"}
+  - {id: req_boost, type: int8_t, initial_value: "-1"}
+  - {id: req_supply, type: uint8_t, initial_value: "0"}
+  - {id: req_exhaust, type: uint8_t, initial_value: "0"}
+  - {id: req_ashrae, type: uint8_t, initial_value: "0"}
+  - {id: req_test, type: bool, initial_value: "false"}
+  # Settings for Power on, saved while the ERV runs steadily without boost. Defaults are
   # the 2026-10-29 settings: 120/120 CFM (code 7), ASHRAE 30 min/h.
   - {id: saved_supply, type: uint8_t, restore_value: true, initial_value: "7"}
   - {id: saved_exhaust, type: uint8_t, restore_value: true, initial_value: "7"}
@@ -127,7 +136,7 @@ interval:
             {"RXD", id(uart_rxd), &id(rxd_frames), &id(rxd_bad), &id(rxd_junk), {}, 0, "", 0},
             {"TXD", id(uart_txd), &id(txd_frames), &id(txd_bad), &id(txd_junk), {}, 0, "", 0},
           };
-          // Latest decoded state, for "Turn on" and for saving its settings.
+          // Latest decoded state, for the controls and for saving Power on's settings.
           static bool on = false, boosting = false;
           static uint8_t cur_supply = 0, cur_exhaust = 0, cur_ashrae = 0;
           static uint32_t settled_since = 0;
@@ -160,6 +169,25 @@ interval:
             if (a == "B1") return id(reg_txd_b1);
             if (a == "F1") return id(reg_txd_f1);
             return nullptr;
+          };
+
+          // Airflow code: 50 + 10 x v up to 13 (180 CFM); the menu then jumps to 200,
+          // which is code 16. 14 and 15 have never been seen.
+          auto cfm = [](uint8_t v) { return v <= 13 ? 50.0f + 10.0f * v : v == 16 ? 200.0f : NAN; };
+          auto valid = [](uint8_t v) { return (v >= 1 && v <= 13 && v % 2) || v == 16; };
+          // The controls show the ERV's state; while off, the settings Power on will use.
+          // Called after every change and after every request, so a refused request (or
+          // one the ERV ignores) snaps back in HA.
+          auto publish_controls = [&]() {
+            if (!power_known) return;
+            id(power_switch).publish_state(on);
+            char s[16];
+            uint8_t sup = on ? cur_supply : id(saved_supply);
+            uint8_t exh = on ? cur_exhaust : id(saved_exhaust);
+            uint8_t ash = on ? cur_ashrae : id(saved_ashrae);
+            if (valid(sup)) { snprintf(s, sizeof s, "%d CFM", (int) cfm(sup)); id(supply_select).publish_state(s); }
+            if (valid(exh)) { snprintf(s, sizeof s, "%d CFM", (int) cfm(exh)); id(exhaust_select).publish_state(s); }
+            if (ash >= 1 && ash <= 6) { snprintf(s, sizeof s, "%d min/h", 10 * ash); id(ashrae_select).publish_state(s); }
           };
 
           auto handle = [&](Line &L) {
@@ -203,14 +231,11 @@ interval:
             // Byte k is chars 2k (low nibble) and 2k+1 (high nibble).
             uint8_t b[4];
             for (int k = 0; k < 4; k++) b[k] = hexval(data[2 * k]) | hexval(data[2 * k + 1]) << 4;
-            // Airflow code: 50 + 10 x v up to 13 (180 CFM); the menu then jumps to 200,
-            // which is code 16. 14 and 15 have never been seen.
-            auto cfm = [](uint8_t v) { return v <= 13 ? 50.0f + 10.0f * v : v == 16 ? 200.0f : NAN; };
             // While off the ERV zeroes 01 and 11, so their values mean nothing then.
             settled_since = millis();
             if (addr == "01") {
               // A unit already running at boot counts as settled.
-              if (b[0] && !on) on_since = power_known ? millis() : millis() - 300000;
+              if (b[0] && !on) on_since = power_known ? millis() : millis() - 60000;
               power_known = true;
               on = b[0] != 0;
               cur_supply = b[1];
@@ -230,6 +255,7 @@ interval:
               memcpy(b1, b, 4);
               b1_dirty = true;
             }
+            if (addr == "01" || addr == "11" || addr == "21") publish_controls();
           };
 
           for (auto &L : lines) {
@@ -258,8 +284,8 @@ interval:
 
           uint32_t now = millis();
 
-          // Publish B1 once the ERV has run for 5 min; unavailable while off or settling.
-          bool b1_ok = on && now - on_since > 300000;
+          // Publish B1 once the ERV has run for 1 min; unavailable while off or settling.
+          bool b1_ok = on && now - on_since > 60000;
           if (b1_ok != b1_shown || (b1_ok && b1_dirty)) {
             id(inside_temp).publish_state(b1_ok ? (int8_t) b1[0] : NAN);
             id(inside_rh).publish_state(b1_ok ? b1[1] : NAN);
@@ -269,9 +295,8 @@ interval:
             b1_dirty = false;
           }
 
-          // Save the settings for "Turn on" once 01/11/21 have been unchanged for 5 s with
+          // Save the settings for Power on once 01/11/21 have been unchanged for 5 s with
           // the ERV on and not boosting (boost reports 200/200 in 01, which isn't a setting).
-          auto valid = [](uint8_t v) { return (v >= 1 && v <= 13) || v == 16; };
           if (on && !boosting && now - settled_since > 5000 && valid(cur_supply) &&
               valid(cur_exhaust) && cur_ashrae >= 1 && cur_ashrae <= 6 &&
               (cur_supply != id(saved_supply) || cur_exhaust != id(saved_exhaust) ||
@@ -279,7 +304,7 @@ interval:
             id(saved_supply) = cur_supply;
             id(saved_exhaust) = cur_exhaust;
             id(saved_ashrae) = cur_ashrae;
-            ESP_LOGI("ervlink", "saved settings for Turn on: supply %u, exhaust %u, ASHRAE %u",
+            ESP_LOGI("ervlink", "saved settings for Power on: supply %u, exhaust %u, ASHRAE %u",
                      cur_supply, cur_exhaust, cur_ashrae);
           }
 
@@ -292,8 +317,12 @@ interval:
           enum Phase { IDLE, WAIT_IN, ACTIVE, WAIT_OUT };
           static Phase phase = IDLE;
           static HighFrequencyLoopRequester fast;
-          static uint8_t kind = 0, cycles = 0, sent = 0;
+          static uint8_t cycles = 0, sent = 0;
           static uint32_t t_req = 0, t_next = 0, t_rx00 = 0, t_on = 0;
+          // The command to send: 00/10/20, FF = leave this byte alone (as the wall control).
+          static uint8_t c00[4], c10[4], c20[4];
+          static bool has_cmd = false;
+          static const char *what = "";
 
           auto gap_left = [&](Line &L, std::initializer_list<const char *> ends, int gap) {
             if (L.len != 0 || L.uart->available()) return -1;
@@ -324,24 +353,75 @@ interval:
             out.push_back((uint8_t) ~bcc);
           };
 
-          if (phase == IDLE && id(intercept_req)) {
-            kind = id(intercept_req);
-            id(intercept_req) = 0;
-            bool fresh = now - lines[1].last_end < 1000 && now - lines[0].last_end < 1000;
-            if (!fresh) {
-              ESP_LOGW("ervlink", "intercept refused: no live traffic on both lines");
-            } else if (kind == 2 && on) {
-              ESP_LOGW("ervlink", "Turn on refused: the ERV is already on");
+          const uint8_t idle00[4] = {0xFF, 0xFF, 0xFF, 0}, idle10[4] = {0xFF, 0xFF, 0, 0},
+                        idle20[4] = {0xFF, 0, 0, 0}, zero[4] = {0, 0, 0, 0};
+          if (phase == IDLE && (id(req_power) >= 0 || id(req_boost) >= 0 || id(req_supply) ||
+                                id(req_exhaust) || id(req_ashrae) || id(req_test))) {
+            int8_t rp = id(req_power), rb = id(req_boost);
+            uint8_t rs = id(req_supply), re = id(req_exhaust), ra = id(req_ashrae);
+            bool test = id(req_test);
+            id(req_power) = id(req_boost) = -1;
+            id(req_supply) = id(req_exhaust) = id(req_ashrae) = 0;
+            id(req_test) = false;
+            memcpy(c00, idle00, 4); memcpy(c10, idle10, 4); memcpy(c20, idle20, 4);
+            has_cmd = false;
+            what = "Intercept test";
+            // Commands as the wall control sends them (2026-10-29 session, CLAUDE.md).
+            auto snapshot = [&](uint8_t power) {
+              const uint8_t a[4] = {power, id(saved_supply), id(saved_exhaust), 0},
+                            b[4] = {id(saved_ashrae), 0xFF, 0, 0};
+              memcpy(c00, a, 4); memcpy(c10, b, 4); memcpy(c20, zero, 4);
+              has_cmd = true;
+            };
+            if (!power_known) {
+              ESP_LOGW("ervlink", "request ignored: ERV state not known yet");
+              test = false;
+            } else if (!on) {
+              // Settings while off only change what Power on will send.
+              if (rs) id(saved_supply) = rs;
+              if (re) id(saved_exhaust) = re;
+              if (ra) id(saved_ashrae) = ra;
+              if (rb == 1) ESP_LOGW("ervlink", "Boost ignored: the ERV is off");
+              if (rp == 1) { snapshot(1); what = "Power on"; }
+            } else if (rp == 0) {
+              snapshot(0);
+              what = "Power off";
+            } else if (rb == 1 && !boosting) {
+              const uint8_t a[4] = {1, 0xFF, 0xFF, 0}, b[4] = {cur_ashrae, 6, 0, 0}, c[4] = {1, 0, 0, 0};
+              memcpy(c00, a, 4); memcpy(c10, b, 4); memcpy(c20, c, 4);
+              has_cmd = true;
+              what = "Boost on";
+            } else if (rb == 0 && boosting) {
+              // The wall control's cancel: boost off plus an explicit airflow restore.
+              const uint8_t a[4] = {1, id(saved_supply), id(saved_exhaust), 0}, b[4] = {cur_ashrae, 6, 0, 0};
+              memcpy(c00, a, 4); memcpy(c10, b, 4); memcpy(c20, zero, 4);
+              has_cmd = true;
+              what = "Boost off";
             } else {
-              // Turn on: 3 cycles of the snapshot (the wall control holds each command for 3),
-              // then 2 idle. Test: 3 idle cycles.
-              cycles = kind == 2 ? 5 : 3;
+              what = "Settings";
+              if ((rs || re) && boosting) {
+                ESP_LOGW("ervlink", "airflow change ignored while boosting");
+              } else {
+                if (rs && rs != cur_supply) { c00[1] = rs; has_cmd = true; }
+                if (re && re != cur_exhaust) { c00[2] = re; has_cmd = true; }
+              }
+              if (ra && ra != cur_ashrae) { c10[0] = ra; has_cmd = true; }
+            }
+            publish_controls();
+            bool fresh = now - lines[1].last_end < 1000 && now - lines[0].last_end < 1000;
+            if (!has_cmd && !test) {
+              // Nothing to send (already in that state, or ignored above).
+            } else if (!fresh) {
+              ESP_LOGW("ervlink", "%s refused: no live traffic on both lines", what);
+            } else {
+              // A command: 3 cycles (the wall control holds each command for 3), then 2 idle.
+              // Test: 3 idle cycles.
+              cycles = has_cmd ? 5 : 3;
               sent = 0;
               t_req = now;
               phase = WAIT_IN;
               fast.start();
-              ESP_LOGI("ervlink", "%s: waiting for a gap on both lines",
-                       kind == 2 ? "Turn on" : "Intercept test");
+              ESP_LOGI("ervlink", "%s: waiting for a gap on both lines", what);
             }
           }
 
@@ -372,25 +452,19 @@ interval:
             // The last cycle started at t_next - 200 and takes ~150 ms to send.
             if ((int32_t) (now - (t_next - 200 + 160)) >= 0) phase = WAIT_OUT;
           } else if (phase == ACTIVE && (int32_t) (now - t_next) >= 0) {
-            {
-              const uint8_t idle00[4] = {0xFF, 0xFF, 0xFF, 0}, idle10[4] = {0xFF, 0xFF, 0, 0},
-                            idle20[4] = {0xFF, 0, 0, 0}, zero[4] = {0, 0, 0, 0};
-              const uint8_t on00[4] = {1, id(saved_supply), id(saved_exhaust), 0},
-                            on10[4] = {id(saved_ashrae), 0xFF, 0, 0};
-              bool cmd = kind == 2 && sent < 3;
-              std::vector<uint8_t> out;
-              frame(out, "00", cmd ? on00 : idle00);
-              frame(out, "10", cmd ? on10 : idle10);
-              frame(out, "20", cmd ? zero : idle20);
-              frame(out, "30", zero);
-              frame(out, "F0", zero);
-              id(uart_rxd).write_array(out.data(), out.size());
-              if (sent == 0 && cmd)
-                ESP_LOGI("ervlink", "sending Turn on: supply %u, exhaust %u, ASHRAE %u",
-                         id(saved_supply), id(saved_exhaust), id(saved_ashrae));
-              sent++;
-              t_next += 200;
-            }
+            bool cmd = has_cmd && sent < 3;
+            std::vector<uint8_t> out;
+            frame(out, "00", cmd ? c00 : idle00);
+            frame(out, "10", cmd ? c10 : idle10);
+            frame(out, "20", cmd ? c20 : idle20);
+            frame(out, "30", zero);
+            frame(out, "F0", zero);
+            id(uart_rxd).write_array(out.data(), out.size());
+            if (sent == 0 && cmd)
+              ESP_LOGI("ervlink", "sending %s: 00 %s/ 10 %s/ 20 %s", what, dump(c00, 4).c_str(),
+                       dump(c10, 4).c_str(), dump(c20, 4).c_str());
+            sent++;
+            t_next += 200;
           }
 
           if (phase == WAIT_OUT) {
@@ -415,17 +489,65 @@ interval:
           }
 
 button:
+  # Boost is always 60 min (the wall control offers no other length); the ERV times it and
+  # then restores the airflow itself. The Boost binary sensor shows whether it is running.
   - platform: template
-    name: "Turn on"
-    icon: "mdi:power"
+    name: "Boost"
+    icon: "mdi:fan-plus"
     on_press:
-      - lambda: id(intercept_req) = 2;
+      - lambda: id(req_boost) = 1;
+  - platform: template
+    name: "Stop boost"
+    icon: "mdi:fan-remove"
+    on_press:
+      - lambda: id(req_boost) = 0;
   - platform: template
     name: "Intercept test"
     icon: "mdi:swap-horizontal"
     entity_category: diagnostic
     on_press:
-      - lambda: id(intercept_req) = 1;
+      - lambda: id(req_test) = true;
+
+# The controls only post a request; the interval lambda sends it and publishes their state
+# from what the ERV reports. restore_mode DISABLED: never send anything at boot.
+switch:
+  - platform: template
+    id: power_switch
+    name: "Power"
+    icon: "mdi:power"
+    restore_mode: DISABLED
+    turn_on_action:
+      - lambda: id(req_power) = 1;
+    turn_off_action:
+      - lambda: id(req_power) = 0;
+
+select:
+  # The wall control's menu: 20 CFM steps (codes 1, 3, ... 13, then 16 for 200).
+  - platform: template
+    id: supply_select
+    name: "Supply airflow"
+    icon: "mdi:fan"
+    options: &airflow ["60 CFM", "80 CFM", "100 CFM", "120 CFM", "140 CFM", "160 CFM", "180 CFM", "200 CFM"]
+    set_action:
+      - lambda: |-
+          int c = atoi(x.c_str());
+          id(req_supply) = c >= 200 ? 16 : (c - 50) / 10;
+  - platform: template
+    id: exhaust_select
+    name: "Exhaust airflow"
+    icon: "mdi:fan"
+    options: *airflow
+    set_action:
+      - lambda: |-
+          int c = atoi(x.c_str());
+          id(req_exhaust) = c >= 200 ? 16 : (c - 50) / 10;
+  - platform: template
+    id: ashrae_select
+    name: "ASHRAE run time"
+    icon: "mdi:timer-cog-outline"
+    options: ["10 min/h", "20 min/h", "30 min/h", "40 min/h", "50 min/h", "60 min/h"]
+    set_action:
+      - lambda: id(req_ashrae) = atoi(x.c_str()) / 10;
 
 text_sensor:
   - {platform: template, id: reg_rxd_00, name: "RXD 00", icon: "mdi:arrow-right-bold", entity_category: diagnostic}
@@ -463,7 +585,7 @@ sensor:
   - {platform: template, id: boost_duration, name: "Boost duration", device_class: duration, unit_of_measurement: "min", accuracy_decimals: 0, update_interval: never}
   # TXD B1: inside temp, inside RH, outside temp, outside RH (all confirmed against the
   # display). Temps assumed signed for sub-zero readings; not yet seen. Unavailable while
-  # the ERV is off and for 5 min after it starts (no airflow, so they read the unit).
+  # the ERV is off and for 1 min after it starts (no airflow, so they read the unit).
   - {platform: template, id: inside_temp, name: "Inside temperature", device_class: temperature, unit_of_measurement: "°C", state_class: measurement, accuracy_decimals: 0, update_interval: never}
   - {platform: template, id: inside_rh, name: "Inside humidity", device_class: humidity, unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, update_interval: never}
   - {platform: template, id: outside_temp, name: "Outside temperature", device_class: temperature, unit_of_measurement: "°C", state_class: measurement, accuracy_decimals: 0, update_interval: never}
