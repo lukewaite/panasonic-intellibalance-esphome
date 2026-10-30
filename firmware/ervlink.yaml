@@ -238,7 +238,7 @@ text_sensor:
 binary_sensor:
   # TXD 01 byte 0: 0 when off, 1 when on.
   - {platform: template, id: erv_power, name: "Power", device_class: running}
-  # TXD 21 byte 0: 1 while boost runs. The countdown lives in the wall control only.
+  # TXD 21 byte 0: 1 while boost runs. The ERV times boost itself and restores airflow.
   - {platform: template, id: boost, name: "Boost", device_class: running}
 
 sensor:

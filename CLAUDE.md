@@ -232,15 +232,18 @@ Each command register on RXD has a matching state register on TXD (`x0` → `x1`
 - **Commands:** `FF` = leave this byte alone. Each byte is held for 3 cycles (~0.6 s) on its own,
   so fields edited in quick succession overlap within one frame. The ERV applies a command within
   0.2–0.4 s of its first frame.
-- **The wall control owns the settings.** While off, the ERV zeroes `01` and `11`. Turning on, and
-  cancelling boost, makes the panel re-send a full snapshot (`00 = 10707000`, `10 = 30..`,
-  `20 = 00`); the ERV does not restore airflow after boost on its own. Boost's countdown runs only
-  on the panel (`11`/`21` stay constant during it).
+- **Off forgets, boost doesn't.** While off, the ERV zeroes `01` and `11`, and turning on makes the
+  panel re-send a full snapshot (`00 = 10707000`, `10 = 30FF0000`, `20 = 00000000`). Boost is
+  different: **the ERV times it itself and restores the pre-boost airflow on its own.** A 60 min
+  boost started 22:36:22.48 ended at 23:36:24.59 (60 min 2 s) with `21`/`11` cleared and `01` back
+  to 120/120, and nothing at all on RXD. The panel's countdown is display only (`11`/`21` stay
+  constant while it runs). Cancelling early is the panel's job: it sends `20 = 00000000` plus an
+  explicit airflow restore in `00`.
 - **UI-only buttons:** Vent opens the airflow editor (each field sends its command when you move
   past it: supply, then exhaust, even if unchanged). A short Filter press sends nothing.
 
 Still unknown: `30`/`F0` commands and `31`/`A1`/`F1` state never changed (`F1 = 00003E00`
-throughout); the 3 s Filter reset, a boost timing out on its own, sub-zero outside temps, the
+throughout); the 3 s Filter reset, sub-zero outside temps, the
 and the ASHRAE range.
 
 ## Superseded claims from the first attempt
