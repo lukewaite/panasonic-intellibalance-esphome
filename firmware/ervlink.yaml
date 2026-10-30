@@ -1,0 +1,245 @@
+# ervlink — LISTEN-ONLY firmware for the rev A inline interface board.
+#
+# Reads both lines of the ERV <-> wall control link through the comparator taps and
+# publishes every register to Home Assistant. It never transmits and holds the relay
+# off, so the link stays in hardware passthrough (bring-up step 4, DESIGN.md).
+#
+#   RXD line = wall control -> ERV (commands), tapped on GPIO1, UART1
+#   TXD line = ERV -> wall control (state),    tapped on GPIO0, UART0
+#
+# The comparators invert, so each UART is a plain idle-high 4800 8E1 receiver.
+# GPIO10 / GPIO3 (driver gates) are deliberately left unconfigured: their 100 k gate
+# pull-downs keep Q2/Q3 off. GPIO11 (relay) is driven low at boot.
+#
+# Frame: 02 | A1 A0 | D7..D0 | 03 | BCC, ASCII hex, BCC = ~(XOR of A1..ETX).
+# Health check: frame rates should sit near 25/s (RXD) and 19/s (TXD) with zero bad
+# frames. Anything else means the tap or the UART settings are wrong, not a noisy bus.
+#
+# Self-contained on purpose: paste it into the ESPHome dashboard as-is.
+# Secrets needed in the dashboard's secrets.yaml:
+#   thread_tlv        HA: Settings > Devices & services > Thread > (your network) >
+#                     the (i) button > "Active dataset TLVs"
+#   ervlink_api_key   32-byte base64 key; also encrypts OTA uploads
+
+esphome:
+  name: ervlink
+  friendly_name: ERV link
+  on_boot:
+    priority: 800
+    then:
+      - output.turn_off: relay
+
+esp32:
+  board: esp32-c6-devkitc-1
+  variant: esp32c6
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: DEBUG
+
+network:
+  enable_ipv6: true
+
+openthread:
+  tlv: !secret thread_tlv
+
+api:
+  encryption:
+    key: !secret ervlink_api_key
+
+# OTA reuses the API key (bare `encryption:` inherits it); no separate password.
+ota:
+  - platform: esphome
+    encryption: {}
+
+# Relay coil driver (Q1). Never turned on by this firmware.
+output:
+  - platform: gpio
+    id: relay
+    pin: GPIO11
+
+uart:
+  - id: uart_rxd
+    rx_pin: GPIO1
+    baud_rate: 4800
+    data_bits: 8
+    parity: EVEN
+    stop_bits: 1
+    rx_buffer_size: 512
+  - id: uart_txd
+    rx_pin: GPIO0
+    baud_rate: 4800
+    data_bits: 8
+    parity: EVEN
+    stop_bits: 1
+    rx_buffer_size: 512
+
+globals:
+  - {id: rxd_frames, type: uint32_t, initial_value: "0"}
+  - {id: rxd_bad, type: uint32_t, initial_value: "0"}
+  - {id: rxd_junk, type: uint32_t, initial_value: "0"}
+  - {id: txd_frames, type: uint32_t, initial_value: "0"}
+  - {id: txd_bad, type: uint32_t, initial_value: "0"}
+  - {id: txd_junk, type: uint32_t, initial_value: "0"}
+
+interval:
+  # One frame is 13 bytes x 2.29 ms; the 512-byte buffers hold ~1 s, so 20 ms is ample.
+  - interval: 20ms
+    then:
+      - lambda: |-
+          struct Line {
+            const char *name;
+            uart::UARTComponent *uart;
+            uint32_t *frames, *bad, *junk;
+            uint8_t buf[13];
+            uint8_t len;
+          };
+          static Line lines[2] = {
+            {"RXD", id(uart_rxd), &id(rxd_frames), &id(rxd_bad), &id(rxd_junk), {}, 0},
+            {"TXD", id(uart_txd), &id(txd_frames), &id(txd_bad), &id(txd_junk), {}, 0},
+          };
+
+          auto dump = [](const uint8_t *b, size_t n) {
+            std::string s;
+            char h[4];
+            for (size_t i = 0; i < n; i++) { snprintf(h, sizeof h, "%02X ", b[i]); s += h; }
+            return s;
+          };
+          auto is_hex = [](uint8_t c) { return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'); };
+          auto hexval = [](char c) -> uint8_t { return c <= '9' ? c - '0' : c - 'A' + 10; };
+
+          auto reg_sensor = [&](const std::string &a) -> text_sensor::TextSensor * {
+            if (a == "00") return id(reg_rxd_00);
+            if (a == "10") return id(reg_rxd_10);
+            if (a == "20") return id(reg_rxd_20);
+            if (a == "30") return id(reg_rxd_30);
+            if (a == "F0") return id(reg_rxd_f0);
+            if (a == "01") return id(reg_txd_01);
+            if (a == "11") return id(reg_txd_11);
+            if (a == "21") return id(reg_txd_21);
+            if (a == "31") return id(reg_txd_31);
+            if (a == "A1") return id(reg_txd_a1);
+            if (a == "B1") return id(reg_txd_b1);
+            if (a == "F1") return id(reg_txd_f1);
+            return nullptr;
+          };
+
+          auto handle = [&](Line &L) {
+            const uint8_t *f = L.buf;
+            bool ok = f[11] == 0x03;
+            uint8_t x = 0;
+            for (int i = 1; i <= 11; i++) {
+              if (i <= 10 && !is_hex(f[i])) ok = false;
+              x ^= f[i];
+            }
+            if (!ok || (uint8_t) ~x != f[12]) {
+              (*L.bad)++;
+              ESP_LOGW("ervlink", "%s bad frame (%s): %s", L.name,
+                       ok ? "BCC" : "format", dump(f, 13).c_str());
+              return;
+            }
+            (*L.frames)++;
+            std::string addr((const char *) f + 1, 2), data((const char *) f + 3, 8);
+            // Low address nibble encodes direction: 0 on RXD, 1 on TXD.
+            char want = (L.name[0] == 'R') ? '0' : '1';
+            auto *s = addr[1] == want ? reg_sensor(addr) : nullptr;
+            if (s == nullptr) {
+              std::string u = std::string(L.name) + " " + addr + " " + data;
+              if (id(reg_unknown).state != u) {
+                ESP_LOGW("ervlink", "unexpected register: %s", u.c_str());
+                id(reg_unknown).publish_state(u);
+              }
+              return;
+            }
+            if (s->state == data) return;
+            ESP_LOGI("ervlink", "%s %s: %s -> %s", L.name, addr.c_str(),
+                     s->state.empty() ? "(none)" : s->state.c_str(), data.c_str());
+            s->publish_state(data);
+            if (addr == "B1") {
+              sensor::Sensor *b[4] = {id(b1_byte0), id(b1_byte1), id(b1_byte2), id(b1_byte3)};
+              for (int i = 0; i < 4; i++)
+                b[i]->publish_state(hexval(data[2 * i]) * 16 + hexval(data[2 * i + 1]));
+            }
+          };
+
+          for (auto &L : lines) {
+            uint8_t c;
+            while (L.uart->available() && L.uart->read_byte(&c)) {
+              if (L.len == 0) {
+                if (c == 0x02) L.buf[L.len++] = c;
+                else (*L.junk)++;
+                continue;
+              }
+              // Bytes 1..11 are ASCII hex or ETX, never STX, so an STX there means the
+              // previous frame was cut short: count it and resync. Byte 12 (BCC) can be 02.
+              if (c == 0x02 && L.len < 12) {
+                (*L.bad)++;
+                ESP_LOGW("ervlink", "%s truncated frame: %s", L.name, dump(L.buf, L.len).c_str());
+                L.len = 1;
+                continue;
+              }
+              L.buf[L.len++] = c;
+              if (L.len == 13) {
+                handle(L);
+                L.len = 0;
+              }
+            }
+          }
+
+text_sensor:
+  - {platform: template, id: reg_rxd_00, name: "RXD 00", icon: "mdi:arrow-right-bold"}
+  - {platform: template, id: reg_rxd_10, name: "RXD 10", icon: "mdi:arrow-right-bold"}
+  - {platform: template, id: reg_rxd_20, name: "RXD 20", icon: "mdi:arrow-right-bold"}
+  - {platform: template, id: reg_rxd_30, name: "RXD 30", icon: "mdi:arrow-right-bold"}
+  - {platform: template, id: reg_rxd_f0, name: "RXD F0", icon: "mdi:arrow-right-bold"}
+  - {platform: template, id: reg_txd_01, name: "TXD 01", icon: "mdi:arrow-left-bold"}
+  - {platform: template, id: reg_txd_11, name: "TXD 11", icon: "mdi:arrow-left-bold"}
+  - {platform: template, id: reg_txd_21, name: "TXD 21", icon: "mdi:arrow-left-bold"}
+  - {platform: template, id: reg_txd_31, name: "TXD 31", icon: "mdi:arrow-left-bold"}
+  - {platform: template, id: reg_txd_a1, name: "TXD A1", icon: "mdi:arrow-left-bold"}
+  - {platform: template, id: reg_txd_b1, name: "TXD B1", icon: "mdi:arrow-left-bold"}
+  - {platform: template, id: reg_txd_f1, name: "TXD F1", icon: "mdi:arrow-left-bold"}
+  - platform: template
+    id: reg_unknown
+    name: "Unexpected register"
+    entity_category: diagnostic
+
+sensor:
+  # B1 is the suspected sensor register; numeric bytes graph against the weather.
+  - {platform: template, id: b1_byte0, name: "TXD B1 byte 0", accuracy_decimals: 0, update_interval: never}
+  - {platform: template, id: b1_byte1, name: "TXD B1 byte 1", accuracy_decimals: 0, update_interval: never}
+  - {platform: template, id: b1_byte2, name: "TXD B1 byte 2", accuracy_decimals: 0, update_interval: never}
+  - {platform: template, id: b1_byte3, name: "TXD B1 byte 3", accuracy_decimals: 0, update_interval: never}
+
+  - platform: template
+    name: "RXD frame rate"
+    unit_of_measurement: "frames/s"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    update_interval: 10s
+    lambda: |-
+      static uint32_t n0 = 0, t0 = 0;
+      uint32_t n = id(rxd_frames), t = millis();
+      float r = t0 ? (n - n0) * 1000.0f / (t - t0) : NAN;
+      n0 = n; t0 = t;
+      return r;
+  - platform: template
+    name: "TXD frame rate"
+    unit_of_measurement: "frames/s"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    update_interval: 10s
+    lambda: |-
+      static uint32_t n0 = 0, t0 = 0;
+      uint32_t n = id(txd_frames), t = millis();
+      float r = t0 ? (n - n0) * 1000.0f / (t - t0) : NAN;
+      n0 = n; t0 = t;
+      return r;
+  - {platform: template, name: "RXD bad frames", lambda: "return id(rxd_bad);", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, update_interval: 10s}
+  - {platform: template, name: "TXD bad frames", lambda: "return id(txd_bad);", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, update_interval: 10s}
+  - {platform: template, name: "RXD junk bytes", lambda: "return id(rxd_junk);", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, update_interval: 10s}
+  - {platform: template, name: "TXD junk bytes", lambda: "return id(txd_junk);", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, update_interval: 10s}
+  - {platform: uptime, name: "Uptime", entity_category: diagnostic}

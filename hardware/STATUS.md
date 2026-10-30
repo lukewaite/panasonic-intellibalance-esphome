@@ -3,7 +3,7 @@
 **Start here when parts or boards arrive.** Design rationale is in [DESIGN.md](DESIGN.md); this
 file is what's ordered, what to check on arrival, and the bring-up procedure in the order to do it.
 
-Last updated 2026-10-10. Branch `hardware-rev-a`.
+Last updated 2026-10-29. Branch `hardware-rev-a`.
 
 ## Orders (placed 2026-10-10)
 
@@ -38,16 +38,39 @@ a short 4-conductor thermostat-wire jumper from the ERV terminals to J1.
 
 ## Not done yet
 
-- **Firmware.** No ESPHome config exists yet. Needed for bring-up step 4: both UARTs at 4800 8E1
-  reading the taps (GPIO1 = panel RXD, GPIO0 = ERV TXD after the comparators; comparators invert,
-  so the ESP sees normal idle-high UART), BCC check, publish register changes to Home Assistant
-  over Thread (`openthread`). Relay on GPIO11 must stay off in this mode. Pin table: DESIGN.md
-  "ESP — U1".
+- **Analog capture of the installed board (step 4.4–4.7).** Skipped so far: listen-only firmware
+  decodes both lines cleanly, so it is not needed to listen. Still needed **before intercept**:
+  eTX/pTX levels set R24/R25 (the driver's high level towards the wall control).
+- **Bench checks (step 5)** not done: relay click, SW1 override, EN-low relay-off, 3.3 V under
+  Thread transmit. SW1 is not fitted on the installed board, so the relay cannot energise.
 - **`tools/decode.py` takes two channels named `RXD` and `TXD`.** The bring-up capture has four
   (both sides of each line). Either export/decode one pair at a time (name the pair RXD/TXD), or
   extend the tool to take a channel mapping.
 - The explainer artifact (https://claude.ai/artifact/MWfcdhNfVyDjRu9qpwLJSf) matches rev A as
   ordered.
+
+## Bring-up log
+
+**2026-10-29 — board 1 installed, listen-only firmware running.**
+
+- All THT parts fitted except **SW1** (left off on purpose: with SW1 out the coil has no supply,
+  so the board is passthrough-only whatever the firmware does). SW1 orientation does not matter:
+  the footprint is symmetric and pin 3 is unconnected; turning it round only swaps which slider
+  position is AUTO. Meter-check pins 1–2 against the silkscreen after fitting.
+- Installed unpowered: the wall control worked exactly as before (passthrough proven).
+- **Wire the data lines crossed** — the ERV's and the wall control's `TXD` terminal goes to the
+  board's `RXD`, and vice versa, on both J1 and J2. Label-to-label puts the commands on the TXD
+  tap and nothing on the RXD tap. See CLAUDE.md "Wiring".
+- **A blank ESP32-C6 module boot-loops** (`invalid header: 0xffffffff`, USB drops every ~2.5 s),
+  so the browser's serial picker can't hold the port. Put it in download mode first:
+  `esptool --chip esp32c6 --port /dev/cu.usbmodem* --after no-reset flash-id` (or short the BOOT
+  pad to GND at power-up). esptool read: ESP32-C6 rev v0.2, 8 MB flash, 40 MHz.
+- First flash over USB from the HA ESPHome Device Builder ("Plug into this computer"); since then
+  logs, states and OTA run over Thread. Secrets `thread_tlv` and `ervlink_api_key` live in the
+  add-on's `secrets.yaml`; OTA inherits the API key (`ota: encryption: {}`).
+- The board is powered from a USB brick. JP1 stays open (ERV 5 V budget unknown).
+- Result: **RXD 25.0 frames/s, TXD 19.0 frames/s, 0 bad frames on both**, no unexpected
+  registers, 4 junk bytes on RXD at boot only. Registers are HA entities `sensor.erv_link_*`.
 
 ## When the boards and parts arrive
 
