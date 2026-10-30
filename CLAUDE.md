@@ -225,6 +225,9 @@ Each command register on RXD has a matching state register on TXD (`x0` → `x1`
   1, 3, 5, 7, 9, 11, 13 (CFM = 50 + 10 × code) and then **200 = code 16**, not 15. Seen on the bus:
   1, 3, 7, 9, 13, 16. Even codes and 14/15 are never sent by the panel; whether the ERV accepts
   them is untested.
+- **`FE`/`FE` in `01` while on = the rest part of the ASHRAE cycle** (fans stopped). Seen
+  2026-10-30 at ASHRAE 30 min/h: `01 = 10EFEF00` from exactly 30 min after the setting took
+  effect. At 60 min/h the ERV never rests.
 - **ASHRAE:** set in 10 min/h steps; the byte is the value in tens (seen 1, 2, 3).
 - **`B1`**: all four fields confirmed against the display. Outside: 2025-12-14 3 °C/85 %;
   2026-10-29 15 °C/75 %, 14 °C/76 %. Inside (In/Out button): 2026-10-29 66 °F/48 % = `13 30`

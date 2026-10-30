@@ -2,7 +2,7 @@
 #
 # Reads both lines of the ERV <-> wall control link through the comparator taps and
 # publishes every register to Home Assistant. The relay stays in hardware passthrough
-# except for short intercepts to send a command (v6):
+# except for short intercepts to send a command (v7):
 #   Power (switch), Boost/Stop boost (buttons), Supply/Exhaust airflow, ASHRAE (selects):
 #     ~1.4 s each, sending the wall control's command frames for that button for 3 cycles,
 #     then 2 idle.
@@ -137,13 +137,13 @@ interval:
             {"TXD", id(uart_txd), &id(txd_frames), &id(txd_bad), &id(txd_junk), {}, 0, "", 0},
           };
           // Latest decoded state, for the controls and for saving Power on's settings.
-          static bool on = false, boosting = false;
+          static bool on = false, boosting = false, moving = false;
           static uint8_t cur_supply = 0, cur_exhaust = 0, cur_ashrae = 0;
           static uint32_t settled_since = 0;
-          // B1 is only meaningful with air moving: while off, the sensors drift to the air
-          // sitting in the unit (2026-10-30: "outside" 16 °C with 8 °C outside).
+          // B1 is only meaningful with air moving: while off or resting, the sensors drift to
+          // the air sitting in the unit (2026-10-30: "outside" 16 °C with 8 °C outside).
           static bool power_known = false, b1_dirty = false, b1_shown = false;
-          static uint32_t on_since = 0;
+          static uint32_t moving_since = 0;
           static uint8_t b1[4];
 
           auto dump = [](const uint8_t *b, size_t n) {
@@ -182,8 +182,8 @@ interval:
             if (!power_known) return;
             id(power_switch).publish_state(on);
             char s[16];
-            uint8_t sup = on ? cur_supply : id(saved_supply);
-            uint8_t exh = on ? cur_exhaust : id(saved_exhaust);
+            uint8_t sup = on && valid(cur_supply) ? cur_supply : id(saved_supply);
+            uint8_t exh = on && valid(cur_exhaust) ? cur_exhaust : id(saved_exhaust);
             uint8_t ash = on ? cur_ashrae : id(saved_ashrae);
             if (valid(sup)) { snprintf(s, sizeof s, "%d CFM", (int) cfm(sup)); id(supply_select).publish_state(s); }
             if (valid(exh)) { snprintf(s, sizeof s, "%d CFM", (int) cfm(exh)); id(exhaust_select).publish_state(s); }
@@ -234,15 +234,21 @@ interval:
             // While off the ERV zeroes 01 and 11, so their values mean nothing then.
             settled_since = millis();
             if (addr == "01") {
-              // A unit already running at boot counts as settled.
-              if (b[0] && !on) on_since = power_known ? millis() : millis() - 60000;
+              // Airflow FE/FE while on: the rest part of the ASHRAE cycle (2026-10-30: at
+              // 30 min/h, FE exactly 30 min after the setting took effect). Fans stopped.
+              bool resting = b[1] == 0xFE && b[2] == 0xFE;
+              bool now_moving = b[0] && !resting;
+              // A unit already moving air at boot counts as settled.
+              if (now_moving && !moving) moving_since = power_known ? millis() : millis() - 60000;
               power_known = true;
               on = b[0] != 0;
+              moving = now_moving;
               cur_supply = b[1];
               cur_exhaust = b[2];
               id(erv_power).publish_state(on);
-              id(airflow_supply).publish_state(on ? cfm(b[1]) : NAN);
-              id(airflow_exhaust).publish_state(on ? cfm(b[2]) : NAN);
+              id(ventilating).publish_state(moving);
+              id(airflow_supply).publish_state(!on ? NAN : resting ? 0.0f : cfm(b[1]));
+              id(airflow_exhaust).publish_state(!on ? NAN : resting ? 0.0f : cfm(b[2]));
               if (!on) id(ashrae).publish_state(NAN);
             } else if (addr == "11") {
               cur_ashrae = b[0];
@@ -284,8 +290,8 @@ interval:
 
           uint32_t now = millis();
 
-          // Publish B1 once the ERV has run for 1 min; unavailable while off or settling.
-          bool b1_ok = on && now - on_since > 60000;
+          // Publish B1 once air has moved for 1 min; unavailable while off, resting or settling.
+          bool b1_ok = moving && now - moving_since > 60000;
           if (b1_ok != b1_shown || (b1_ok && b1_dirty)) {
             id(inside_temp).publish_state(b1_ok ? (int8_t) b1[0] : NAN);
             id(inside_rh).publish_state(b1_ok ? b1[1] : NAN);
@@ -576,11 +582,14 @@ binary_sensor:
   - {platform: template, id: erv_power, name: "Power", device_class: running}
   # TXD 21 byte 0: 1 while boost runs. The ERV times boost itself and restores airflow.
   - {platform: template, id: boost, name: "Boost", device_class: running}
+  # On while the fans run: off when the ERV is off or in the rest part of the ASHRAE cycle.
+  - {platform: template, id: ventilating, name: "Ventilating", device_class: running}
   # Relay state: on while the board drives the ERV instead of the wall control.
   - {platform: template, id: intercepting, name: "Intercepting", entity_category: diagnostic}
 
 sensor:
   # TXD 01 bytes 1/2: supply, exhaust (confirmed 2026-10-29 by setting them apart).
+  # 0 CFM during the ASHRAE rest, unavailable while off.
   - {platform: template, id: airflow_supply, name: "Supply airflow", unit_of_measurement: "CFM", state_class: measurement, accuracy_decimals: 0, update_interval: never}
   - {platform: template, id: airflow_exhaust, name: "Exhaust airflow", unit_of_measurement: "CFM", state_class: measurement, accuracy_decimals: 0, update_interval: never}
   # TXD 11 byte 0: ASHRAE run time in tens of minutes per hour. Byte 1: the selected boost
@@ -589,7 +598,7 @@ sensor:
   - {platform: template, id: boost_duration, name: "Boost duration", device_class: duration, unit_of_measurement: "min", accuracy_decimals: 0, update_interval: never}
   # TXD B1: inside temp, inside RH, outside temp, outside RH (all confirmed against the
   # display). Temps assumed signed for sub-zero readings; not yet seen. Unavailable while
-  # the ERV is off and for 1 min after it starts (no airflow, so they read the unit).
+  # no air moves (off, ASHRAE rest) and for 1 min after it starts (they read the unit).
   - {platform: template, id: inside_temp, name: "Inside temperature", device_class: temperature, unit_of_measurement: "°C", state_class: measurement, accuracy_decimals: 0, update_interval: never}
   - {platform: template, id: inside_rh, name: "Inside humidity", device_class: humidity, unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, update_interval: never}
   - {platform: template, id: outside_temp, name: "Outside temperature", device_class: temperature, unit_of_measurement: "°C", state_class: measurement, accuracy_decimals: 0, update_interval: never}
