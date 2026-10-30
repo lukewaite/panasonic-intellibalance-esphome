@@ -38,9 +38,9 @@ a short 4-conductor thermostat-wire jumper from the ERV terminals to J1.
 
 ## Not done yet
 
-- **Analog capture of the installed board (step 4.4–4.7).** Skipped so far: listen-only firmware
-  decodes both lines cleanly, so it is not needed to listen. Still needed **before intercept**:
-  eTX/pTX levels set R24/R25 (the driver's high level towards the wall control).
+- **Analog capture of the installed board (step 4.4–4.7).** Skipped: both lines decode cleanly,
+  and intercept worked without it (2026-10-30). Still worth doing to check the eTX/pTX levels
+  set by R24/R25 against the thresholds, but nothing is blocked on it.
 - **Bench checks (step 5)** not done: relay click, SW1 override, EN-low relay-off, 3.3 V under
   Thread transmit. SW1 is now fitted and set to AUTO, so only the firmware (GPIO11, held off at
   boot) keeps the relay in passthrough.
@@ -61,6 +61,9 @@ a short 4-conductor thermostat-wire jumper from the ERV terminals to J1.
   the silkscreen is right either way round.
 - 2026-10-30: SW1 fitted and set to **AUTO**. Not yet mounted in the box: the 1591C floor needs
   the five standoff holes drilled (DESIGN.md "Enclosure"); the standoffs are nylon, so don't glue.
+- 2026-10-30: **intercept works.** Firmware v5 "Intercept test" (relay in, forward the panel's
+  frames for 3 cycles, relay out) disturbed nothing, and "Turn on" started the ERV at 120/120,
+  0.5 s after the press. Details: `captures/2026-10-30/2026-10-30-notes.md`.
 - Installed unpowered: the wall control worked exactly as before (passthrough proven).
 - **Wire the data lines crossed** — the ERV's and the wall control's `TXD` terminal goes to the
   board's `RXD`, and vice versa, on both J1 and J2. Label-to-label puts the commands on the TXD
@@ -131,8 +134,9 @@ With no power the relay rests in passthrough, so this is a plain wiring change.
 
 ### 6. Onward
 
-Listen-only firmware on the ERV (register mapping via Home Assistant history), then intercept
-forward-only, then injecting the known On/Off command. Details: DESIGN.md "Bring-up" steps 4–6.
+Done: listen-only register mapping, intercept forward-only, injecting the turn-on command
+(2026-10-30). Next: turn the ERV back on by itself after a mains outage (the panel sends
+`FFFFFFFF` on every RXD register once at power-on).
 
 ## Box
 
