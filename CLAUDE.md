@@ -228,7 +228,8 @@ Each command register on RXD has a matching state register on TXD (`x0` → `x1`
 - **`FE`/`FE` in `01` while on = the rest part of the ASHRAE cycle** (fans stopped). Seen
   2026-10-30 at ASHRAE 30 min/h: `01 = 10EFEF00` from exactly 30 min after the setting took
   effect (12:38:53.95), back to `10707000` 30 min later (13:08:55.42). The ERV runs the cycle
-  itself, with nothing on RXD. At 60 min/h it never rests.
+  itself, with nothing on RXD. At 60 min/h it never rests. Boost overrides a rest, and the cycle restarts with
+  a full run period when boost ends (2026-10-30 20:38–22:08).
 - **ASHRAE:** set in 10 min/h steps; the byte is the value in tens (seen 1, 2, 3).
 - **`B1`**: all four fields confirmed against the display. Outside: 2025-12-14 3 °C/85 %;
   2026-10-29 15 °C/75 %, 14 °C/76 %. Inside (In/Out button): 2026-10-29 66 °F/48 % = `13 30`
