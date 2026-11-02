@@ -135,8 +135,9 @@ With no power the relay rests in passthrough, so this is a plain wiring change.
 ### 6. Onward
 
 Done: listen-only register mapping, intercept forward-only, injecting the turn-on command
-(2026-10-30). Next: turn the ERV back on by itself after a mains outage (the panel sends
-`FFFFFFFF` on every RXD register once at power-on).
+(2026-10-30), and turning the ERV back on after a mains outage (firmware v9, 2026-11-02; not
+yet tested with a real outage). Test it by cutting the ERV's mains for a few seconds with the
+board on its USB brick, then again with the brick on the same circuit (board reboots too).
 
 ## Box
 
