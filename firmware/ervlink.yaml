@@ -2,7 +2,7 @@
 #
 # Reads both lines of the ERV <-> wall control link through the comparator taps and
 # publishes every register to Home Assistant. The relay stays in hardware passthrough
-# except for short intercepts to send a command (v8):
+# except for short intercepts to send a command (v9):
 #   Power and Boost (switches), Supply/Exhaust airflow, ASHRAE (selects):
 #     ~1.4 s each, sending the wall control's command frames for that button for 3 cycles,
 #     then 2 idle.
@@ -11,6 +11,8 @@
 # control hears nothing (its TXD input is held at the 0 V idle level). The wall control
 # shows the result anyway, as it displays the ERV's state from TXD.
 # While the ERV is off, the airflow and ASHRAE selects set what Power on will use.
+# After a mains outage the ERV comes back off; if it was on before, the board turns it
+# back on ("Resume after power failure").
 #
 #   RXD line = wall control -> ERV (commands), tapped on GPIO1, UART1, driven via GPIO10/Q2
 #   TXD line = ERV -> wall control (state),    tapped on GPIO0, UART0, driven via GPIO3/Q3
@@ -115,6 +117,9 @@ globals:
   - {id: saved_supply, type: uint8_t, restore_value: true, initial_value: "7"}
   - {id: saved_exhaust, type: uint8_t, restore_value: true, initial_value: "7"}
   - {id: saved_ashrae, type: uint8_t, restore_value: true, initial_value: "3"}
+  # Whether the ERV should be running: its power state, as last changed by the wall control or
+  # HA. A power-up "off" isn't a change of mind, so it is not recorded (see link_up below).
+  - {id: want_on, type: bool, restore_value: true, initial_value: "true"}
 
 interval:
   # One frame is 13 bytes x 2.29 ms; the 512-byte buffers hold ~1 s. Normally this runs
@@ -145,6 +150,11 @@ interval:
           static bool power_known = false, b1_dirty = false, b1_shown = false;
           static uint32_t moving_since = 0;
           static uint8_t b1[4];
+          // When the ERV's state line last came up: at boot, or after >2 s of silence (a mains
+          // outage; the ERV is silent while it boots). Power changes within 15 s of it are the
+          // ERV powering up, not a choice, so want_on ignores them. Resume checks follow it.
+          static uint32_t link_up = 0, next_try = 0;
+          static uint8_t tries_left = 0;
 
           auto dump = [](const uint8_t *b, size_t n) {
             std::string s;
@@ -206,6 +216,12 @@ interval:
               return;
             }
             (*L.frames)++;
+            if (L.name[0] == 'T' && (L.last_end == 0 || millis() - L.last_end > 2000)) {
+              ESP_LOGI("ervlink", "ERV link up%s", L.last_end ? " after a silence" : "");
+              link_up = millis();
+              next_try = link_up + 10000;
+              tries_left = 3;
+            }
             L.last[0] = f[1]; L.last[1] = f[2]; L.last[2] = 0;
             L.last_end = millis();
             std::string addr((const char *) f + 1, 2), data((const char *) f + 3, 8);
@@ -241,8 +257,13 @@ interval:
               bool now_moving = b[0] && !resting;
               // A unit already moving air at boot counts as settled.
               if (now_moving && !moving) moving_since = power_known ? millis() : millis() - 60000;
+              bool was_known = power_known, was_on = on;
               power_known = true;
               on = b[0] != 0;
+              if (was_known && on != was_on && millis() - link_up > 15000 && on != id(want_on)) {
+                id(want_on) = on;
+                ESP_LOGI("ervlink", "remembered: the ERV should be %s", on ? "on" : "off");
+              }
               moving = now_moving;
               cur_supply = b[1];
               cur_exhaust = b[2];
@@ -300,6 +321,19 @@ interval:
             id(outside_rh).publish_state(b1_ok ? b1[3] : NAN);
             b1_shown = b1_ok;
             b1_dirty = false;
+          }
+
+          // Resume after a power failure: the link came up with the ERV off, but it should be on.
+          // Up to 3 tries, 30 s apart, in case the ERV wasn't ready for the first.
+          if (tries_left && (int32_t) (now - next_try) >= 0) {
+            if (!power_known || on || !id(want_on) || !id(resume_switch).state) {
+              tries_left = 0;
+            } else {
+              tries_left--;
+              next_try = now + 30000;
+              ESP_LOGW("ervlink", "ERV off after power-up but it was on: turning it back on");
+              id(req_power) = 1;
+            }
           }
 
           // Save the settings for Power on once 01/11/21 have been unchanged for 5 s with
@@ -515,6 +549,13 @@ switch:
       - lambda: id(req_power) = 1;
     turn_off_action:
       - lambda: id(req_power) = 0;
+  - platform: template
+    id: resume_switch
+    name: "Resume after power failure"
+    icon: "mdi:power-plug-battery-outline"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
   # Boost is always 60 min (the wall control offers no other length); the ERV times it and
   # then restores the airflow itself, so the switch turns itself off. Off early = cancel.
   - platform: template
