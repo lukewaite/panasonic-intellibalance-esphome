@@ -1,0 +1,38 @@
+name: firmware
+
+on:
+  push:
+    branches: [main]
+    paths: ["firmware/**", ".github/workflows/firmware.yml"]
+  pull_request:
+    paths: ["firmware/**", ".github/workflows/firmware.yml"]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: firmware/test/run.sh
+
+  compile:
+    name: ESPHome compile (ESP32-C6)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # The same ESPHome as the HA add-on (firmware/mise.toml).
+      - name: Install ESPHome
+        run: pip install "esphome==$(sed -n 's/^"pipx:esphome" = "\(.*\)"/\1/p' firmware/mise.toml)"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/esphome
+            ~/.platformio
+            firmware/test/build/esphome/.esphome
+          key: esphome-${{ hashFiles('firmware/mise.toml') }}-${{ github.sha }}
+          restore-keys: esphome-${{ hashFiles('firmware/mise.toml') }}-
+      - run: firmware/test/compile.sh

@@ -31,7 +31,8 @@ hardware/kicad/                 KiCad 10 project. ervlink.kicad_sch is GENERATED
 firmware/ervlink.yaml           ESPHome config: entities + wiring only (paste into the Device Builder)
 firmware/components/ervlink/    The logic (ervlink_core.*), plain C++; loaded by the YAML from this repo at tag fw-vNN
 firmware/test/                  Host tests: simulated ERV + wall control + board, and a replay of the 2025-12-14 capture
-firmware/mise.toml              Local ESPHome pinned to the HA add-on's version; `mise run test`
+firmware/mise.toml              Local ESPHome pinned to the HA add-on's version; `mise run test`, `mise run compile`
+.github/workflows/firmware.yml  CI on firmware changes: host tests + ESP32-C6 compile against the checkout
 captures/2025-12-14/
   Session 0.sal                Saleae session, 28 MB — ARCHIVAL GROUND TRUTH
   analog.csv                   Saleae analog export, 1.25 MS/s, 26.9M samples, 645 MB — GITIGNORED
@@ -83,7 +84,8 @@ scenario there before fixing a bug; it is how the v13 shared-outage bug was foun
 The YAML loads the component from GitHub at a tag (`external_components` → `ref: fw-vNN`). To
 deploy: commit, tag `fw-vNN`, push the tag, bump `ref` (and the version in the header) in the
 YAML, then install from the Device Builder. To compile locally first, copy the YAML and point the
-source at the working tree (`type: local`, `path: <repo>/firmware/components`).
+source at the working tree: `mise run compile` does that with placeholder secrets (CI runs it
+and the tests on every push touching `firmware/`). Tag only a commit whose CI passed.
 
 ### Regenerating the board
 
