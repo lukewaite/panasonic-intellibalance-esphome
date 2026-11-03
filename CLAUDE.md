@@ -20,7 +20,7 @@ power-on in the logs after an outage or board power-up is that, not a stray inte
 ## Layout
 
 ```
-README.md                       Research log — protocol section rewritten to match the decode
+README.md                       Public overview: what works, board, firmware, protocol summary
 pcb.jpg                         Wall control PCB photo (2.7 MB)
 tools/decode.py                 The decoder. Stdlib only, no dependencies.
 hardware/STATUS.md              Rev A orders, what's not done yet, arrival + bring-up checklist — START HERE
@@ -32,8 +32,6 @@ firmware/mise.toml              Pins the local ESPHome version to the HA add-on'
 captures/2025-12-14/
   Session 0.sal                Saleae session, 28 MB — ARCHIVAL GROUND TRUTH
   analog.csv                   Saleae analog export, 1.25 MS/s, 26.9M samples, 645 MB — GITIGNORED
-  digital.csv                  Saleae digital export — thresholds were wrong, do not use
-  rxd.txt / txd.txt            Saleae Async Serial decode — INVALID (wrong baud/polarity)
   2025-12-14-notes.md          Operator log for the capture
   derived/
     edges-rxd.csv              Re-thresholded edges, enough to reproduce the decode (272 KB)
@@ -45,8 +43,6 @@ captures/2025-12-14/
 channels. `analog.csv` is **gitignored**: at 645 MB it exceeds GitHub's per-file limit, and it is
 a regenerable export (re-export from the Saleae app when needed). The committed `derived/edges-*.csv`
 let you reproduce the full decode without it — verified byte-identical to a full analog run.
-
-Never trust `digital.csv`, `rxd.txt`, or `txd.txt`.
 
 ### Running the decoder
 
@@ -128,14 +124,14 @@ All of the following is confirmed against the analog capture with **zero** incon
 
 - **4800 baud, 8 data bits, even parity, 1 stop bit (8E1) — 11 bits/byte, INVERTED.**
 - Inverted means idle = 0 V and the start bit is a **rising** edge. A normal (non-inverted)
-  UART decode produces garbage — that is the single biggest error in the old notes.
+  UART decode produces garbage.
 - Bit time fit by requiring all pulse widths to be integer multiples of T: rms residual
   0.004 bits at 208.4 µs. Unambiguous.
 - Edges are heavily RC-limited (~80 µs slew on a 208 µs bit). Threshold **at true mid-swing**
   (RXD ≈ 2.35 V, TXD ≈ 1.15 V) or you get a large duty-cycle skew and spurious framing errors.
 - The 2.3 V swing on TXD is **below the ESP32 V_IH of ~2.48 V** — an ESP32 cannot reliably read
-  this line directly. Needs a comparator or level shifter. (Open question: is 2.3 V the real
-  driven level or an artifact of where the probe was placed?)
+  this line directly, hence the rev A comparator taps. (Not yet measured at the ERV end on the
+  installed board: STATUS.md "Not done yet".)
 
 ### Frame format
 
@@ -172,9 +168,8 @@ Note the address low nibble encodes the direction: `0` on RXD, `1` on TXD.
 
 ### Direction (established, not assumed)
 
-**RXD = wall control → unit (commands). TXD = unit → wall control (state).**
-
-The labels are therefore from the **unit's** point of view, not the panel's.
+**RXD = wall control → unit (commands). TXD = unit → wall control (state).** These are this
+repo's names; the CN2 terminal labels are the other way round (see "Wiring" above).
 
 Proof, from the On/Off press: RXD `00` changed to a new value and held it for exactly 3 cycles
 (14.236, 14.436, 14.636 s), then **reverted** to its idle pattern. TXD `01` then latched that
@@ -193,8 +188,9 @@ Command line (RXD), idle / "no request" pattern — note the FF staircase:
 | `30` | `00000000` | `00000000` |
 | `F0` | `00000000` | `00000000` |
 
-At mains power-on (6.83 s) all five RXD registers send `FFFFFFFF` once, then the line goes quiet
-for 2.1 s while the unit boots.
+At mains power-on (6.83 s) all five RXD registers send `FFFFFFFF` once, then RXD goes quiet for
+2.1 s while the wall control boots; TXD starts within 50 ms and keeps running. Firmware v13 uses
+this to recognise a mains power-up.
 
 State line (TXD):
 
@@ -255,32 +251,12 @@ Still unknown: `30`/`F0` commands and `31`/`A1`/`F1` state never changed (`F1 = 
 throughout); the 3 s Filter reset, sub-zero outside temps
 and the ASHRAE range.
 
-## Superseded claims from the first attempt
-
-README.md has been rewritten to match the verified decode, so these errors survive only in git
-history (commit `a8d523a`) and in the stale `rxd.txt` / `txd.txt` / `digital.csv` exports. Listed
-here so they aren't accidentally reintroduced from those files:
-
-1. "RXD ~9600 baud" — no. **Both lines are 4800 baud.**
-2. "non-inverted (idle high)" — no. **Both lines are inverted, idle low (0 V).**
-3. "8N1" — no. **8E1** (even parity); 11 bits/byte, confirmed by the 2.29 ms byte pitch.
-4. "signal swing ~1.2 V to ~3.8 V, treat as 3.3 V TTL" — no. RXD is **0–4.7 V (5 V logic)**;
-   TXD is **0–2.3 V**. The 1.2–3.8 V figures were an artifact of bad thresholds on slow edges.
-5. Decoded byte streams like `FC C7`, `3F AE E6 EE`, `2E F9` are **decode artifacts** and carry
-   no meaning. Same for the "framing errors" attributed to oscillator tolerance — the real cause
-   was wrong polarity and off-centre thresholds.
-6. "Directionality to be determined" — resolved, see above.
-
-The first attempt's hardware observations (connector pinout, PCB markings, button inventory) were
-sound and are retained in README.md.
-
 ## Conventions for this repo
 
 - Store new captures as `captures/YYYY-MM-DD/` with a `YYYY-MM-DD-notes.md` operator log.
-- **Always log wall-clock or capture-relative timestamps for every button press.** The existing
-  notes were timed by counting in the operator's head, which cost real effort to reconcile
-  against the capture (the press is at 14.24 s, not the noted ~10 s).
-- Export analog, not just digital. Digital exports bake in threshold choices that turned out to
-  be wrong.
+- **Always log wall-clock or capture-relative timestamps for every button press.** The 2025-12-14
+  notes were timed by counting, and are off by seconds (the press is at 14.24 s, not ~10 s).
+- Export analog, not just digital. A digital export bakes in one fixed threshold, which can't suit
+  both a 4.7 V and a 2.3 V line.
 - When decoding, verify against BCC + parity + stop bits. All three at 100 % is the bar; anything
   less means the framing parameters are off, not that the bus is noisy.
