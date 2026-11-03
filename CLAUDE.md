@@ -88,9 +88,13 @@ fails without the fix (break the fix, rerun): that is how the v13 and v14 bugs w
 
 A device config pulls `ervlink-package.yaml` from GitHub at a tag (`packages:` →
 `...ervlink-package.yaml@fw-vNN`), and the package loads the component at the same tag
-(`external_components` → `ref: fw-vNN`). To deploy: bump the tag in the package's `ref` and
-header and in both device configs, commit, wait for CI, tag `fw-vNN`, push the tag, then change
-the `@fw-vNN` in the Device Builder's config and install. Entities live in the package, so keep
+(`external_components` → `ref: fw-vNN`). The README points users at `@main`, so **`main` must
+never name a tag that doesn't exist yet**. To release: on a branch, bump the tag in the
+package's `ref` and header and in both device configs, commit, push the branch, wait for CI,
+tag `fw-vNN` on that commit, push the tag, then fast-forward `main` to it. Then change the
+`@fw-vNN` in the Device Builder's config and install. The first fetch of a new tag in the
+Device Builder can fail with "fetch-pack: invalid index-pack output" (two of its processes
+cloning at once); "Save anyway" then Install, and it uses the clone once one has finished. Entities live in the package, so keep
 their names and ids stable: HA's entity IDs follow them. To compile locally first, copy the YAML and point the
 source at the working tree: `mise run compile [example-wifi.yaml]` does that, for the package
 and the component, with placeholder secrets (CI runs it for both device configs and the tests on
