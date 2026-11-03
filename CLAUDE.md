@@ -258,7 +258,7 @@ and the ASHRAE range.
 ## Superseded claims from the first attempt
 
 README.md has been rewritten to match the verified decode, so these errors survive only in git
-history (commit `6e51cac`) and in the stale `rxd.txt` / `txd.txt` / `digital.csv` exports. Listed
+history (commit `a8d523a`) and in the stale `rxd.txt` / `txd.txt` / `digital.csv` exports. Listed
 here so they aren't accidentally reintroduced from those files:
 
 1. "RXD ~9600 baud" — no. **Both lines are 4800 baud.**

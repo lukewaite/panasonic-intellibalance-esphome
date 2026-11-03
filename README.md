@@ -259,4 +259,4 @@ cascaded into the wrong baud rate, polarity and framing. The framing errors it a
 oscillator tolerance had the same root cause.
 
 Its *hardware* observations (pinout, PCB markings, button inventory) were sound and are retained
-above. The original log is preserved in git history at commit `6e51cac`.
+above. The original log is preserved in git history at commit `a8d523a`.

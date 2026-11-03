@@ -12,7 +12,7 @@ Last updated 2026-10-30. Branch `hardware-rev-a`.
 - 5 × PCB, 110 × 56 mm, 2 layers, FR-4 1.6 mm, green, HASL (leaded), 1 oz, tented vias.
 - **Economic PCBA, top side, 2 of the 5 boards assembled.** The other 3 are bare spares.
 - Files uploaded: `kicad/fab/ervlink-gerbers.zip`, `ervlink-bom.csv`, `ervlink-cpl.csv` (the CPL
-  with the rotation/offset corrections from commit `0c63334`; the preview was checked part by part).
+  with the rotation/offset corrections from commit `765620b`; the preview was checked part by part).
 - PCB remark: any rails/tabs on the 56 mm short edges only.
 - "Confirm Parts Placement" was recommended (Yes). If set, JLCPCB emails a placement to approve
   before soldering. **Approve it promptly or the order waits.** Check U1 (ESP module body inside the
