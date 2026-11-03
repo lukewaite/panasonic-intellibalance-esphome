@@ -2,7 +2,7 @@
 #
 # Reads both lines of the ERV <-> wall control link through the comparator taps and
 # publishes every register to Home Assistant. The relay stays in hardware passthrough
-# except for short intercepts to send a command (v9):
+# except for short intercepts to send a command (v10):
 #   Power and Boost (switches), Supply/Exhaust airflow, ASHRAE (selects):
 #     ~1.4 s each, sending the wall control's command frames for that button for 3 cycles,
 #     then 2 idle.
@@ -118,7 +118,7 @@ globals:
   - {id: saved_exhaust, type: uint8_t, restore_value: true, initial_value: "7"}
   - {id: saved_ashrae, type: uint8_t, restore_value: true, initial_value: "3"}
   # Whether the ERV should be running: its power state, as last changed by the wall control or
-  # HA. A power-up "off" isn't a change of mind, so it is not recorded (see link_up below).
+  # HA. The "off" the ERV comes back with after an outage isn't a choice, so it is not recorded.
   - {id: want_on, type: bool, restore_value: true, initial_value: "true"}
 
 interval:
@@ -150,11 +150,20 @@ interval:
           static bool power_known = false, b1_dirty = false, b1_shown = false;
           static uint32_t moving_since = 0;
           static uint8_t b1[4];
-          // When the ERV's state line last came up: at boot, or after >2 s of silence (a mains
-          // outage; the ERV is silent while it boots). Power changes within 15 s of it are the
-          // ERV powering up, not a choice, so want_on ignores them. Resume checks follow it.
-          static uint32_t link_up = 0, next_try = 0;
+          // Mains power-up, seen as the wall control's FFFFFFFF burst on RXD (the board stayed
+          // up), or as the board itself starting from a power-on or brownout reset (it shares
+          // the outage; an OTA or crash reboot doesn't count). Until the ERV is seen running
+          // again its "off" is the outage, not a choice, and the resume checks run.
+          static bool powerup = false, boot_checked = false;
+          static uint32_t powerup_at = 0, next_try = 0;
           static uint8_t tries_left = 0;
+          auto arm_resume = [&](const char *why) {
+            ESP_LOGI("ervlink", "mains power-up (%s)", why);
+            powerup = true;
+            powerup_at = millis();
+            next_try = powerup_at + 10000;
+            tries_left = 3;
+          };
 
           auto dump = [](const uint8_t *b, size_t n) {
             std::string s;
@@ -216,15 +225,16 @@ interval:
               return;
             }
             (*L.frames)++;
-            if (L.name[0] == 'T' && (L.last_end == 0 || millis() - L.last_end > 2000)) {
-              ESP_LOGI("ervlink", "ERV link up%s", L.last_end ? " after a silence" : "");
-              link_up = millis();
-              next_try = link_up + 10000;
-              tries_left = 3;
+            if (!boot_checked) {
+              boot_checked = true;
+              auto why = esp_reset_reason();
+              if (why == ESP_RST_POWERON || why == ESP_RST_BROWNOUT) arm_resume("board power-on reset");
             }
             L.last[0] = f[1]; L.last[1] = f[2]; L.last[2] = 0;
             L.last_end = millis();
             std::string addr((const char *) f + 1, 2), data((const char *) f + 3, 8);
+            // At mains power-on the wall control sends FFFFFFFF once on every RXD register.
+            if (L.name[0] == 'R' && addr == "00" && data == "FFFFFFFF") arm_resume("wall control burst");
             // Low address nibble encodes direction: 0 on RXD, 1 on TXD.
             char want = (L.name[0] == 'R') ? '0' : '1';
             auto *s = addr[1] == want ? reg_sensor(addr) : nullptr;
@@ -260,10 +270,12 @@ interval:
               bool was_known = power_known, was_on = on;
               power_known = true;
               on = b[0] != 0;
-              if (was_known && on != was_on && millis() - link_up > 15000 && on != id(want_on)) {
+              if (was_known && on != was_on && !(powerup && !on) && on != id(want_on)) {
                 id(want_on) = on;
+                global_preferences->sync();  // now, not at the next 1 min flush: an outage may follow
                 ESP_LOGI("ervlink", "remembered: the ERV should be %s", on ? "on" : "off");
               }
+              if (on) powerup = false;
               moving = now_moving;
               cur_supply = b[1];
               cur_exhaust = b[2];
@@ -323,10 +335,12 @@ interval:
             b1_dirty = false;
           }
 
-          // Resume after a power failure: the link came up with the ERV off, but it should be on.
-          // Up to 3 tries, 30 s apart, in case the ERV wasn't ready for the first.
+          // Resume after a power failure: the ERV came back off, but it should be on. Up to 3
+          // tries, 30 s apart, in case the ERV wasn't ready; waits up to 2 min for its state.
           if (tries_left && (int32_t) (now - next_try) >= 0) {
-            if (!power_known || on || !id(want_on) || !id(resume_switch).state) {
+            if (!power_known) {
+              if (now - powerup_at > 120000) tries_left = 0; else next_try = now + 5000;
+            } else if (on || !id(want_on) || !id(resume_switch).state) {
               tries_left = 0;
             } else {
               tries_left--;
