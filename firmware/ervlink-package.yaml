@@ -1,0 +1,354 @@
+# ervlink package (v16): everything for the rev A board except what is particular to one
+# install. Include it from a device config that sets the name, the API key and the network
+# (Thread or Wi-Fi); see ervlink.yaml (Thread, the author's) and example-wifi.yaml:
+#
+#   packages:
+#     ervlink: github://lukewaite/panasonic-intellibalance-esphome/firmware/ervlink-package.yaml@fw-v16
+#
+# Reads both lines of the ERV <-> wall control link through the comparator taps and
+# publishes every register to Home Assistant. The relay stays in hardware passthrough
+# except for short intercepts to send a command:
+#   Power and Boost (switches), Supply/Exhaust airflow, ASHRAE (selects):
+#     ~1.4 s each, sending the wall control's command frames for that button for 3 cycles,
+#     then 2 idle.
+#   "Intercept test" ~1 s: sends only the wall control's idle "no change" frames.
+# Nothing is forwarded: during the intercept the ERV hears only the ESP and the wall
+# control hears nothing (its TXD input is held at the 0 V idle level). The wall control
+# shows the result anyway, as it displays the ERV's state from TXD.
+# While the ERV is off, the airflow and ASHRAE selects set what Power on will use.
+# After a mains outage the ERV comes back off; if it was on before, the board turns it
+# back on ("Resume after power failure").
+#
+# The logic lives in components/ervlink/ervlink_core.{h,cpp} (tested on a host by
+# test/run.sh), loaded below from the repo at the same tag. This file only wires it up:
+# UART bytes in; entities, relay, RXD driver and flash out.
+#
+#   RXD line = wall control -> ERV (commands), tapped on GPIO1, UART1, driven via GPIO10/Q2
+#   TXD line = ERV -> wall control (state),    tapped on GPIO0, UART0, driven via GPIO3/Q3
+#
+# The comparators invert, so each UART is a plain idle-high 4800 8E1 receiver; Q2/Q3
+# invert again, so each UART is also a plain idle-high transmitter. Both taps sit on the
+# sending end of their line, so they keep reading live traffic while intercepting.
+# GPIO11 (relay) is driven low at boot. SW1 in PASS overrides it in hardware.
+# Health check: frame rates should sit near 25/s (RXD) and 19/s (TXD) with zero bad
+# frames. Anything else means the tap or the UART settings are wrong, not a noisy bus.
+
+esphome:
+  on_boot:
+    priority: 800
+    then:
+      - output.turn_off: relay
+      - binary_sensor.template.publish: {id: intercepting, state: false}
+
+esp32:
+  board: esp32-c6-devkitc-1
+  variant: esp32c6
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+
+# The core, at the same tag as this package (bump both together: tags fw-vNN).
+external_components:
+  - source:
+      type: git
+      url: https://github.com/lukewaite/panasonic-intellibalance-esphome
+      ref: fw-v16
+      path: firmware/components
+    components: [ervlink]
+
+ervlink: {}
+
+# Saved settings (Power on's airflow and ASHRAE, the Resume switch) are written to flash
+# within ~10 s of a change instead of the default 1 min, so an outage soon after a change
+# still restores it. Only changed values are written.
+preferences:
+  flash_write_interval: 10s
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: DEBUG
+
+# OTA reuses the API key (bare `encryption:` inherits it), so the device config must set
+# api: encryption: key.
+ota:
+  - platform: esphome
+    encryption: {}
+
+# Relay coil driver (Q1). High = intercept. Only the core switches it.
+output:
+  - platform: gpio
+    id: relay
+    pin: GPIO11
+
+uart:
+  # tx_buffer_size makes writes non-blocking: one cycle of 5 frames is 65 bytes.
+  - id: uart_rxd
+    rx_pin: GPIO1
+    tx_pin: GPIO10
+    baud_rate: 4800
+    data_bits: 8
+    parity: EVEN
+    stop_bits: 1
+    rx_buffer_size: 512
+    tx_buffer_size: 256
+  # TX is configured only so the pin idles high (Q3 on, wall control input at 0 V).
+  - id: uart_txd
+    rx_pin: GPIO0
+    tx_pin: GPIO3
+    baud_rate: 4800
+    data_bits: 8
+    parity: EVEN
+    stop_bits: 1
+    rx_buffer_size: 512
+
+globals:
+  - {id: erv, type: "ervlink::Core *", initial_value: "nullptr"}
+  # Settings for Power on, saved while the ERV runs steadily without boost. Defaults are
+  # the 2026-10-29 settings: 120/120 CFM (code 7), ASHRAE 30 min/h.
+  - {id: saved_supply, type: uint8_t, restore_value: true, initial_value: "7"}
+  - {id: saved_exhaust, type: uint8_t, restore_value: true, initial_value: "7"}
+  - {id: saved_ashrae, type: uint8_t, restore_value: true, initial_value: "3"}
+
+interval:
+  # One frame is 13 bytes x 2.29 ms; the 512-byte buffers hold ~1 s. Normally this runs
+  # once per main loop (~16 ms). During an intercept the loop runs continuously, so frame
+  # ends and the relay timing are seen to within a few ms.
+  - interval: 1ms
+    then:
+      - lambda: |-
+          // Whether the ERV should be running, and a resume in progress, in their own
+          // preferences: the core asks for them to be committed at once, not at the next
+          // scheduled flash write.
+          static ESPPreferenceObject want_pref =
+              global_preferences->make_preference<bool>(fnv1_hash("ervlink_want_on"), true);
+          static ESPPreferenceObject resume_pref =
+              global_preferences->make_preference<uint8_t>(fnv1_hash("ervlink_resume"), true);
+          if (id(erv) == nullptr) {
+            using ervlink::Out;
+            ervlink::Hooks h;
+            h.value = [](Out o, float v) {
+              switch (o) {
+                case Out::POWER: id(erv_power).publish_state(v != 0); break;
+                case Out::VENTILATING: id(ventilating).publish_state(v != 0); break;
+                case Out::BOOST: id(boost).publish_state(v != 0); break;
+                case Out::CONNECTED: id(erv_connected).publish_state(v != 0); break;
+                case Out::INTERCEPTING: id(intercepting).publish_state(v != 0); break;
+                case Out::POWER_SWITCH: id(power_switch).publish_state(v != 0); break;
+                case Out::BOOST_SWITCH: id(boost_switch).publish_state(v != 0); break;
+                case Out::SUPPLY_CFM: id(airflow_supply).publish_state(v); break;
+                case Out::EXHAUST_CFM: id(airflow_exhaust).publish_state(v); break;
+                case Out::ASHRAE: id(ashrae).publish_state(v); break;
+                case Out::BOOST_MIN: id(boost_duration).publish_state(v); break;
+                case Out::INSIDE_TEMP: id(inside_temp).publish_state(v); break;
+                case Out::INSIDE_RH: id(inside_rh).publish_state(v); break;
+                case Out::OUTSIDE_TEMP: id(outside_temp).publish_state(v); break;
+                case Out::OUTSIDE_RH: id(outside_rh).publish_state(v); break;
+                default: break;
+              }
+            };
+            h.text = [](Out o, const std::string &s) {
+              switch (o) {
+                case Out::SUPPLY_SELECT: id(supply_select).publish_state(s); break;
+                case Out::EXHAUST_SELECT: id(exhaust_select).publish_state(s); break;
+                case Out::ASHRAE_SELECT: id(ashrae_select).publish_state(s); break;
+                case Out::UNKNOWN_REG: id(reg_unknown).publish_state(s); break;
+                default: break;
+              }
+            };
+            h.reg = [](ervlink::Line l, const std::string &a, const std::string &d) {
+              text_sensor::TextSensor *t = nullptr;
+              if (l == ervlink::RXD) {
+                t = a == "00" ? id(reg_rxd_00) : a == "10" ? id(reg_rxd_10) : a == "20" ? id(reg_rxd_20)
+                  : a == "30" ? id(reg_rxd_30) : id(reg_rxd_f0);
+              } else {
+                t = a == "01" ? id(reg_txd_01) : a == "11" ? id(reg_txd_11) : a == "21" ? id(reg_txd_21)
+                  : a == "31" ? id(reg_txd_31) : a == "A1" ? id(reg_txd_a1) : a == "B1" ? id(reg_txd_b1)
+                  : id(reg_txd_f1);
+              }
+              t->publish_state(d);
+            };
+            h.relay = [](bool v) { if (v) id(relay).turn_on(); else id(relay).turn_off(); };
+            h.send = [](const uint8_t *p, size_t n) { id(uart_rxd).write_array(p, n); };
+            h.save_want = [](bool v) {
+              want_pref.save(&v);
+              global_preferences->sync();
+            };
+            h.save_resume = [](uint8_t m) {
+              resume_pref.save(&m);
+              global_preferences->sync();
+            };
+            h.save_settings = [](const ervlink::Settings &s) {
+              id(saved_supply) = s.supply;
+              id(saved_exhaust) = s.exhaust;
+              id(saved_ashrae) = s.ashrae;
+            };
+            h.resume_enabled = []() { return id(resume_switch).state; };
+            h.log = [](int level, const char *m) {
+              if (level == 0) ESP_LOGE("ervlink", "%s", m);
+              else if (level == 1) ESP_LOGW("ervlink", "%s", m);
+              else ESP_LOGI("ervlink", "%s", m);
+            };
+            bool want_on = true;
+            if (!want_pref.load(&want_on)) want_on = true;
+            uint8_t resume_mark = 0;
+            if (!resume_pref.load(&resume_mark)) resume_mark = 0;
+            auto why = esp_reset_reason();
+            bool power_reset = why == ESP_RST_POWERON || why == ESP_RST_BROWNOUT || why == ESP_RST_PWR_GLITCH;
+            id(erv) = new ervlink::Core(h, want_on, {id(saved_supply), id(saved_exhaust), id(saved_ashrae)},
+                                        resume_mark, power_reset, millis());
+          }
+          uint32_t now = millis();
+          uint8_t c;
+          while (id(uart_rxd).available() && id(uart_rxd).read_byte(&c)) id(erv)->feed(ervlink::RXD, c, now);
+          while (id(uart_txd).available() && id(uart_txd).read_byte(&c)) id(erv)->feed(ervlink::TXD, c, now);
+          id(erv)->tick(now);
+          static HighFrequencyLoopRequester fast;
+          if (id(erv)->busy()) fast.start(); else fast.stop();
+
+button:
+  - platform: template
+    name: "Intercept test"
+    icon: "mdi:swap-horizontal"
+    entity_category: diagnostic
+    on_press:
+      - lambda: if (id(erv)) id(erv)->request_test();
+
+# The controls only post a request; the core sends it and publishes their state
+# from what the ERV reports. restore_mode DISABLED: never send anything at boot.
+switch:
+  - platform: template
+    id: power_switch
+    name: "Power"
+    icon: "mdi:power"
+    restore_mode: DISABLED
+    turn_on_action:
+      - lambda: if (id(erv)) id(erv)->request_power(true);
+    turn_off_action:
+      - lambda: if (id(erv)) id(erv)->request_power(false);
+  - platform: template
+    id: resume_switch
+    name: "Resume after power failure"
+    icon: "mdi:power-plug-battery-outline"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  # Boost is always 60 min (the wall control offers no other length); the ERV times it and
+  # then restores the airflow itself, so the switch turns itself off. Off early = cancel.
+  - platform: template
+    id: boost_switch
+    name: "Boost"
+    icon: "mdi:fan-plus"
+    restore_mode: DISABLED
+    turn_on_action:
+      - lambda: if (id(erv)) id(erv)->request_boost(true);
+    turn_off_action:
+      - lambda: if (id(erv)) id(erv)->request_boost(false);
+
+select:
+  # The wall control's menu: 20 CFM steps (codes 1, 3, ... 13, then 16 for 200).
+  - platform: template
+    id: supply_select
+    name: "Supply airflow"
+    icon: "mdi:fan"
+    options: &airflow ["60 CFM", "80 CFM", "100 CFM", "120 CFM", "140 CFM", "160 CFM", "180 CFM", "200 CFM"]
+    set_action:
+      - lambda: |-
+          int c = atoi(x.c_str());
+          if (id(erv)) id(erv)->request_supply(c >= 200 ? 16 : (c - 50) / 10);
+  - platform: template
+    id: exhaust_select
+    name: "Exhaust airflow"
+    icon: "mdi:fan"
+    options: *airflow
+    set_action:
+      - lambda: |-
+          int c = atoi(x.c_str());
+          if (id(erv)) id(erv)->request_exhaust(c >= 200 ? 16 : (c - 50) / 10);
+  - platform: template
+    id: ashrae_select
+    name: "ASHRAE run time"
+    icon: "mdi:timer-cog-outline"
+    options: ["10 min/h", "20 min/h", "30 min/h", "40 min/h", "50 min/h", "60 min/h"]
+    set_action:
+      - lambda: if (id(erv)) id(erv)->request_ashrae(atoi(x.c_str()) / 10);
+
+text_sensor:
+  # Raw registers. The decoded ones (00/10/20, 01/11/21, B1) are disabled by default: the
+  # entities below cover them and they flood HA's logbook. Enable them, or watch the device
+  # log, when decoding something new. 30/F0/31/A1/F1 have never changed, so they stay on to
+  # catch whatever does (the 3 s Filter reset, a filter-due flag).
+  - {platform: template, id: reg_rxd_00, name: "RXD 00", icon: "mdi:arrow-right-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_rxd_10, name: "RXD 10", icon: "mdi:arrow-right-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_rxd_20, name: "RXD 20", icon: "mdi:arrow-right-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_rxd_30, name: "RXD 30", icon: "mdi:arrow-right-bold", entity_category: diagnostic}
+  - {platform: template, id: reg_rxd_f0, name: "RXD F0", icon: "mdi:arrow-right-bold", entity_category: diagnostic}
+  - {platform: template, id: reg_txd_01, name: "TXD 01", icon: "mdi:arrow-left-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_txd_11, name: "TXD 11", icon: "mdi:arrow-left-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_txd_21, name: "TXD 21", icon: "mdi:arrow-left-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_txd_31, name: "TXD 31", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
+  - {platform: template, id: reg_txd_a1, name: "TXD A1", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
+  - {platform: template, id: reg_txd_b1, name: "TXD B1", icon: "mdi:arrow-left-bold", entity_category: diagnostic, disabled_by_default: true}
+  - {platform: template, id: reg_txd_f1, name: "TXD F1", icon: "mdi:arrow-left-bold", entity_category: diagnostic}
+  - platform: template
+    id: reg_unknown
+    name: "Unexpected register"
+    entity_category: diagnostic
+
+binary_sensor:
+  # TXD 01 byte 0: 0 when off, 1 when on.
+  - {platform: template, id: erv_power, name: "Power", device_class: running}
+  # TXD 21 byte 0: 1 while boost runs. The ERV times boost itself and restores airflow.
+  - {platform: template, id: boost, name: "Boost", device_class: running}
+  # On while the ERV's state line is live; off after 10 s without a frame (unpowered/disconnected).
+  - {platform: template, id: erv_connected, name: "ERV connected", device_class: connectivity, entity_category: diagnostic}
+  # On while the fans run: off when the ERV is off or in the rest part of the ASHRAE cycle.
+  - {platform: template, id: ventilating, name: "Ventilating", device_class: running}
+  # Relay state: on while the board drives the ERV instead of the wall control.
+  - {platform: template, id: intercepting, name: "Intercepting", entity_category: diagnostic}
+
+sensor:
+  # TXD 01 bytes 1/2: supply, exhaust (confirmed 2026-10-29 by setting them apart).
+  # 0 CFM during the ASHRAE rest, unavailable while off.
+  - {platform: template, id: airflow_supply, name: "Supply airflow", unit_of_measurement: "CFM", state_class: measurement, accuracy_decimals: 0, update_interval: never}
+  - {platform: template, id: airflow_exhaust, name: "Exhaust airflow", unit_of_measurement: "CFM", state_class: measurement, accuracy_decimals: 0, update_interval: never}
+  # TXD 11 byte 0: ASHRAE run time in tens of minutes per hour. Byte 1: the selected boost
+  # length in tens of minutes, non-zero only while boost runs (not time remaining).
+  - {platform: template, id: ashrae, name: "ASHRAE run time", unit_of_measurement: "min/h", accuracy_decimals: 0, update_interval: never}
+  - {platform: template, id: boost_duration, name: "Boost duration", device_class: duration, unit_of_measurement: "min", accuracy_decimals: 0, update_interval: never}
+  # TXD B1: inside temp, inside RH, outside temp, outside RH (all confirmed against the
+  # display). Temps assumed signed for sub-zero readings; not yet seen. Unavailable while
+  # no air moves (off, ASHRAE rest) and for 1 min after it starts (they read the unit).
+  - {platform: template, id: inside_temp, name: "Inside temperature", device_class: temperature, unit_of_measurement: "°C", state_class: measurement, accuracy_decimals: 0, update_interval: never}
+  - {platform: template, id: inside_rh, name: "Inside humidity", device_class: humidity, unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, update_interval: never}
+  - {platform: template, id: outside_temp, name: "Outside temperature", device_class: temperature, unit_of_measurement: "°C", state_class: measurement, accuracy_decimals: 0, update_interval: never}
+  - {platform: template, id: outside_rh, name: "Outside humidity", device_class: humidity, unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, update_interval: never}
+
+  - platform: template
+    name: "RXD frame rate"
+    unit_of_measurement: "frames/s"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    update_interval: 10s
+    lambda: |-
+      static uint32_t n0 = 0, t0 = 0;
+      uint32_t n = id(erv) ? id(erv)->stats(ervlink::RXD).frames : 0, t = millis();
+      float r = t0 ? (n - n0) * 1000.0f / (t - t0) : NAN;
+      n0 = n; t0 = t;
+      return r;
+  - platform: template
+    name: "TXD frame rate"
+    unit_of_measurement: "frames/s"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    update_interval: 10s
+    lambda: |-
+      static uint32_t n0 = 0, t0 = 0;
+      uint32_t n = id(erv) ? id(erv)->stats(ervlink::TXD).frames : 0, t = millis();
+      float r = t0 ? (n - n0) * 1000.0f / (t - t0) : NAN;
+      n0 = n; t0 = t;
+      return r;
+  - {platform: template, name: "RXD bad frames", lambda: "return id(erv) ? id(erv)->stats(ervlink::RXD).bad : 0;", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, update_interval: 10s}
+  - {platform: template, name: "TXD bad frames", lambda: "return id(erv) ? id(erv)->stats(ervlink::TXD).bad : 0;", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, update_interval: 10s}
+  - {platform: template, name: "RXD junk bytes", lambda: "return id(erv) ? id(erv)->stats(ervlink::RXD).junk : 0;", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, disabled_by_default: true, update_interval: 10s}
+  - {platform: template, name: "TXD junk bytes", lambda: "return id(erv) ? id(erv)->stats(ervlink::TXD).junk : 0;", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, disabled_by_default: true, update_interval: 10s}
+  - {platform: uptime, name: "Uptime", entity_category: diagnostic}

@@ -17,8 +17,11 @@ jobs:
       - run: firmware/test/run.sh
 
   compile:
-    name: ESPHome compile (ESP32-C6)
+    name: ESPHome compile (${{ matrix.device }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        device: [ervlink.yaml, example-wifi.yaml]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -32,7 +35,7 @@ jobs:
           path: |
             ~/.cache/esphome
             ~/.platformio
-            firmware/test/build/esphome/.esphome
-          key: esphome-${{ hashFiles('firmware/mise.toml') }}-${{ github.sha }}
-          restore-keys: esphome-${{ hashFiles('firmware/mise.toml') }}-
-      - run: firmware/test/compile.sh
+            firmware/test/build/esphome
+          key: esphome-${{ matrix.device }}-${{ hashFiles('firmware/mise.toml') }}-${{ github.sha }}
+          restore-keys: esphome-${{ matrix.device }}-${{ hashFiles('firmware/mise.toml') }}-
+      - run: firmware/test/compile.sh ${{ matrix.device }}

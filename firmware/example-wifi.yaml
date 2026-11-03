@@ -1,0 +1,23 @@
+# An ERV link board on Wi-Fi instead of Thread. Paste into the ESPHome Device Builder and
+# change the name; everything else comes from the package. Secrets: wifi_ssid,
+# wifi_password, ervlink_api_key (32-byte base64; also encrypts OTA uploads).
+# To update, change the @fw-vNN at the end of the package line and install.
+
+substitutions:
+  name: ervlink
+  friendly_name: ERV link
+
+packages:
+  ervlink: github://lukewaite/panasonic-intellibalance-esphome/firmware/ervlink-package.yaml@fw-v16
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+api:
+  encryption:
+    key: !secret ervlink_api_key
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password

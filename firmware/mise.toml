@@ -6,5 +6,5 @@ description = "Host tests for components/ervlink (VERBOSE=1 for every log line)"
 run = "test/run.sh"
 
 [tasks.compile]
-description = "Compile ervlink.yaml against the local component, placeholder secrets"
+description = "Compile a device config (default ervlink.yaml) against the local package and component"
 run = "test/compile.sh"
