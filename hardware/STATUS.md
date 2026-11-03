@@ -137,9 +137,11 @@ With no power the relay rests in passthrough, so this is a plain wiring change.
 Done: listen-only register mapping, intercept forward-only, injecting the turn-on command
 (2026-10-30), and turning the ERV back on after a mains outage (firmware v10, 2026-11-02;
 **worked on the first real outage**, back on 10.4 s after mains returned, board on its own USB
-brick: `captures/2026-11-02/2026-11-02-notes.md`). Triggers: the wall control's `FFFFFFFF` burst on RXD, or the
-board's own power-on/brownout reset. Still to test: the board losing power with the ERV (brick on
-the same circuit, or unplug both), which uses the reset-reason path.
+brick: `captures/2026-11-02/2026-11-02-notes.md`). Since v13 a power-up is recognised as the wall
+control booting: its `FFFFFFFF` burst on any RXD register, or RXD silent >0.5 s while the ERV's
+TXD runs (it is quiet ~2.1 s after power-up). The board's own power-on reset counts only if it
+started listening too late (>1.5 s after boot) to see that. Still to test: the board losing power
+with the ERV (brick on the same circuit, or unplug both).
 
 ## Box
 

@@ -2,7 +2,7 @@
 #
 # Reads both lines of the ERV <-> wall control link through the comparator taps and
 # publishes every register to Home Assistant. The relay stays in hardware passthrough
-# except for short intercepts to send a command (v12):
+# except for short intercepts to send a command (v13):
 #   Power and Boost (switches), Supply/Exhaust airflow, ASHRAE (selects):
 #     ~1.4 s each, sending the wall control's command frames for that button for 3 cycles,
 #     then 2 idle.
@@ -50,6 +50,12 @@ esp32:
   flash_size: 8MB
   framework:
     type: esp-idf
+
+# Saved settings (Power on's airflow and ASHRAE, the Resume switch) are written to flash
+# within ~10 s of a change instead of the default 1 min, so an outage soon after a change
+# still restores it. Only changed values are written.
+preferences:
+  flash_write_interval: 10s
 
 logger:
   hardware_uart: USB_SERIAL_JTAG
@@ -147,35 +153,47 @@ interval:
           static bool power_known = false, b1_dirty = false, b1_shown = false;
           static uint32_t moving_since = 0;
           static uint8_t b1[4];
-          // Mains power-up, seen as the wall control's FFFFFFFF burst on RXD (the board stayed
-          // up), or as the board itself starting from a power-on or brownout reset (it shares
-          // the outage; an OTA or crash reboot doesn't count). Until the ERV is seen running
-          // again its "off" is the outage, not a choice, and the resume checks run.
-          // Also when the ERV talks again after >10 s of silence (linked 0 -> 1), in case the
-          // single burst frame was lost: harmless if it wasn't an outage, as want_on is accurate.
-          static bool powerup = false, boot_checked = false;
-          static uint32_t powerup_at = 0, next_try = 0;
-          static uint8_t tries_left = 0;
+          // Mains power-up. The wall control runs on the ERV's 5 V, so it boots with the ERV:
+          // it sends FFFFFFFF once on every RXD register, then nothing for ~2.1 s while the
+          // ERV's state line already runs (2025-12-14 capture). Either sign starts a resume
+          // episode, during which the ERV's "off" is the outage, not a choice. The episode ends
+          // once the ERV is on or the resume gives up, and want_on follows the ERV again.
+          // A dropout of one of the board's own taps is not mistaken for it in a harmful way:
+          // a TXD tap gap leaves RXD running (no episode), and an RXD tap gap leaves want_on
+          // current, so the episode ends at once.
+          static bool powerup = false, boot_checked = false, save_want = false;
+          static uint32_t powerup_at = 0, next_try = 0, listen_from = millis();
+          static uint8_t tries = 0;
           static int8_t linked = -1;  // ERV state line: -1 not yet known, 0 silent, 1 live
+          // Whether the ERV should be running: its power state as last reported, except the
+          // "off" it comes back with after an outage. Kept in its own preference and committed
+          // as soon as the link is free, not at the next scheduled flash write.
+          static ESPPreferenceObject want_pref =
+              global_preferences->make_preference<bool>(fnv1_hash("ervlink_want_on"), true);
+          static bool want_on = [] {
+            bool v = true;
+            return want_pref.load(&v) ? v : true;
+          }();
+          auto remember = [&](bool v) {
+            if (v == want_on) return;
+            want_on = v;
+            save_want = true;
+            ESP_LOGI("ervlink", "remembered: the ERV should be %s", v ? "on" : "off");
+          };
           auto arm_resume = [&](const char *why) {
-            if (powerup && tries_left) return;  // already armed
+            if (powerup) return;
             ESP_LOGI("ervlink", "mains power-up (%s)", why);
             powerup = true;
             powerup_at = millis();
             next_try = powerup_at + 10000;
-            tries_left = 3;
+            tries = 0;
           };
-          // Whether the ERV should be running: its power state as last reported, except the
-          // "off" it comes back with after an outage. Kept in its own preference so a change
-          // reaches flash at once (a restore_value global is only queued for saving once a
-          // second, then flushed once a minute: an outage can follow sooner).
-          static ESPPreferenceObject want_pref =
-              global_preferences->make_preference<bool>(fnv1_hash("ervlink_want_on"), true);
-          static bool want_on = true, want_loaded = false;
-          if (!want_loaded) {
-            want_loaded = true;
-            if (!want_pref.load(&want_on)) want_on = true;
-          }
+          auto end_resume = [&](const char *why) {
+            if (!powerup) return;
+            ESP_LOGI("ervlink", "resume episode over: %s", why);
+            powerup = false;
+            if (power_known) remember(on);
+          };
           // The intercept's state (used here by the resume check, run further down).
           enum Phase { IDLE, WAIT_IN, ACTIVE, WAIT_OUT };
           static Phase phase = IDLE;
@@ -240,17 +258,30 @@ interval:
               return;
             }
             (*L.frames)++;
-            if (L.name[0] == 'T' && linked == 0) arm_resume("ERV talking again after silence");
-            if (!boot_checked) {
-              boot_checked = true;
-              auto why = esp_reset_reason();
-              if (why == ESP_RST_POWERON || why == ESP_RST_BROWNOUT) arm_resume("board power-on reset");
+            uint32_t t = millis();
+            if (L.name[0] == 'T') {
+              // RXD otherwise never pauses for more than ~51 ms, intercepting or not (its tap
+              // reads the wall control); checked outside intercepts all the same.
+              if (!id(intercepting).state &&
+                  t - (lines[0].last_end ? lines[0].last_end : listen_from) > 500)
+                arm_resume("wall control silent while the ERV talks");
+              if (!boot_checked) {
+                boot_checked = true;
+                auto why = esp_reset_reason();
+                ESP_LOGI("ervlink", "first ERV frame at %u ms, listening from %u ms, reset reason %d",
+                         (unsigned) t, (unsigned) listen_from, (int) why);
+                // Started too late to see the wall control boot: go by the board's own power-up,
+                // as it most likely shared the outage (a USB replug looks the same).
+                if (listen_from > 1500 && (why == ESP_RST_POWERON || why == ESP_RST_BROWNOUT ||
+                                           why == ESP_RST_PWR_GLITCH))
+                  arm_resume("board power-on reset");
+              }
             }
             L.last[0] = f[1]; L.last[1] = f[2]; L.last[2] = 0;
-            L.last_end = millis();
+            L.last_end = t;
             std::string addr((const char *) f + 1, 2), data((const char *) f + 3, 8);
-            // At mains power-on the wall control sends FFFFFFFF once on every RXD register.
-            if (L.name[0] == 'R' && addr == "00" && data == "FFFFFFFF") arm_resume("wall control burst");
+            // No command sets all of a register to FF (00 byte 3 and 10/20 bytes 2-3 are always 0).
+            if (L.name[0] == 'R' && data == "FFFFFFFF") arm_resume("wall control burst");
             // Low address nibble encodes direction: 0 on RXD, 1 on TXD.
             char want = (L.name[0] == 'R') ? '0' : '1';
             auto *s = addr[1] == want ? reg_sensor(addr) : nullptr;
@@ -283,16 +314,10 @@ interval:
               bool now_moving = b[0] && !resting;
               // A unit already moving air at boot counts as settled.
               if (now_moving && !moving) moving_since = power_known ? millis() : millis() - 60000;
-              bool was_known = power_known, was_on = on;
               power_known = true;
               on = b[0] != 0;
-              if (!(powerup && !on) && on != want_on) {
-                want_on = on;
-                want_pref.save(&want_on);
-                global_preferences->sync();
-                ESP_LOGI("ervlink", "remembered: the ERV should be %s", on ? "on" : "off");
-              }
-              if (on) powerup = false;
+              if (!powerup) remember(on);
+              else if (on) end_resume("the ERV is on");
               moving = now_moving;
               cur_supply = b[1];
               cur_exhaust = b[2];
@@ -343,7 +368,8 @@ interval:
 
           // No state from the ERV for 10 s: it is unpowered or disconnected. Report it as off
           // (so "off for 10 minutes" alerts still fire) with no readings, refuse commands, and
-          // forget the last registers so the ERV's first frames on return are decoded afresh.
+          // forget the last registers so the ERV's first frames on return are decoded afresh
+          // (cleared without publishing, so HA history shows no fake change).
           // Not recorded in want_on: that only follows what the ERV reports.
           bool now_linked = lines[1].last_end && now - lines[1].last_end < 10000;
           // At boot, give the ERV the same 10 s before calling it missing.
@@ -364,7 +390,7 @@ interval:
               id(boost_duration).publish_state(NAN);
               for (auto *t : {id(reg_txd_01), id(reg_txd_11), id(reg_txd_21), id(reg_txd_31),
                               id(reg_txd_a1), id(reg_txd_b1), id(reg_txd_f1)})
-                t->publish_state("");
+                t->state = "";
             }
           }
 
@@ -380,18 +406,23 @@ interval:
           }
 
           // Resume after a power failure: the ERV came back off, but it should be on. Up to 3
-          // tries, 30 s apart, in case the ERV wasn't ready; waits up to 2 min for its state.
-          // A try counts only when it starts an intercept, not while one is still under way.
-          if (power_known && on) powerup = false;
-          if (tries_left && (int32_t) (now - next_try) >= 0) {
-            if (!power_known) {
-              if (now - powerup_at > 120000) tries_left = 0; else next_try = now + 5000;
-            } else if (on || !want_on || !id(resume_switch).state) {
-              tries_left = 0;
+          // tries, 30 s apart, in case the ERV wasn't ready (a try counts once its relay goes
+          // in); waits up to 2 min for the ERV's state and gives up after 5 min.
+          if (powerup && (int32_t) (now - next_try) >= 0) {
+            if (power_known && on) {
+              end_resume("the ERV is on");
+            } else if (!id(resume_switch).state) {
+              end_resume("resume is switched off");
+            } else if (!want_on) {
+              end_resume("the ERV was off before");
+            } else if (!power_known) {
+              if (now - powerup_at > 120000) end_resume("no state from the ERV");
+              else next_try = now + 1000;
+            } else if (tries >= 3 || now - powerup_at > 300000) {
+              end_resume("gave up, the ERV stays off");
             } else if (phase != IDLE || id(req_power) >= 0) {
               next_try = now + 1000;
             } else {
-              tries_left--;
               next_try = now + 30000;
               ESP_LOGW("ervlink", "ERV off after power-up but it was on: turning it back on");
               id(req_power) = 1;
@@ -474,6 +505,12 @@ interval:
               memcpy(c00, a, 4); memcpy(c10, b, 4); memcpy(c20, zero, 4);
               has_cmd = true;
             };
+            // Off while the ERV is off or unknown (say, after an outage) sends nothing, but it
+            // is a choice: no resume.
+            if (rp == 0 && !(power_known && on)) {
+              end_resume("Power off requested");
+              remember(false);
+            }
             if (!power_known) {
               ESP_LOGW("ervlink", "request ignored: ERV state not known yet");
               test = false;
@@ -536,6 +573,7 @@ interval:
             if (shared || (late && rx_left >= 20)) {
               set_relay(true);
               t_on = now;
+              if (powerup && strcmp(what, "Power on") == 0) tries++;
               // Continue the wall control's cadence: the next cycle would start 200 ms after
               // the last one.
               t_next = t_rx00 + 200;
@@ -587,6 +625,13 @@ interval:
             phase = IDLE;
             fast.stop();
             ESP_LOGE("ervlink", "intercept timed out; relay forced out");
+          }
+
+          // Commit want_on (a flash write takes tens of ms) only while not holding the link.
+          if (save_want && phase == IDLE) {
+            save_want = false;
+            want_pref.save(&want_on);
+            global_preferences->sync();
           }
 
 button:
