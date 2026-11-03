@@ -1,0 +1,105 @@
+# ERV ↔ wall control protocol
+
+The serial link between the Panasonic Intelli-Balance 200 and its FV-SW20VEC1 wall control, as
+decoded from logic-analyzer captures and the installed board.
+
+## Physical layer
+
+**4800 baud, 8 data bits, even parity, 1 stop bit (8E1), inverted**: both lines idle at 0 V and
+the start bit is a rising edge.
+
+| | RXD (commands) | TXD (state) |
+|---|---|---|
+| Direction | wall control → ERV | ERV → wall control |
+| Idle | 0 V | 0 V |
+| Active | 4.7 V | 2.3 V |
+| Bit time | 208.4 µs | 208.4 µs |
+
+Edges are RC-limited (~80 µs slew on a 208 µs bit), so a threshold away from each line's
+mid-swing (≈2.35 V RXD, ≈1.15 V TXD) skews the bit timing and corrupts the decode.
+
+## Frame format
+
+```
+0x02 (STX) | A1 A0 | D7 D6 D5 D4 D3 D2 D1 D0 | 0x03 (ETX) | BCC
+```
+
+13 bytes. The address and data are **ASCII hex characters**. BCC is the complement of the XOR of
+every byte from A1 through ETX:
+
+```python
+def bcc(payload):        # the 10 ASCII chars between STX and ETX
+    x = 0
+    for b in payload:
+        x ^= b
+    return (~(x ^ 0x03)) & 0xFF
+```
+
+The 8 data characters are 4 bytes, each sent **low nibble first**: `"3103F0B4"` = `13 30 0F 4B`.
+
+## Timing
+
+Both sides free-run at ~200 ms with no polling or arbitration, drifting slowly against each other.
+
+- RXD sends `00 10 20 30 F0` every cycle.
+- TXD sends `01 11 21 31`, and once a second `A1 B1 F1` in their place.
+- The low address nibble is the direction: `0` on RXD, `1` on TXD.
+- At mains power-on the wall control (powered from the ERV) sends `FFFFFFFF` once on every RXD
+  register, then is silent for ~2.1 s while the ERV's state line already runs.
+
+## Registers
+
+Each command register has a matching state register (`x0` → `x1`). Bytes as values:
+
+| Cmd → state | Byte 0 | Byte 1 | Byte 2 | Byte 3 |
+|---|---|---|---|---|
+| `00` → `01` | power (0 off, 1 on) | supply airflow code | exhaust airflow code | 0 |
+| `10` → `11` | ASHRAE, tens of min/h | boost length, tens of min (state: only while boosting) | 0 | 0 |
+| `20` → `21` | boost (1 on) | 0 | 0 | 0 |
+| — → `B1` | inside temp °C | inside %RH | outside temp °C | outside %RH |
+
+- **Commands:** the wall control idles at `00 = FFFFFF00`, `10 = FFFF0000`, `20 = FF000000`;
+  `FF` means "leave this byte alone". A command holds for 3 cycles (~0.6 s), then reverts. The
+  ERV applies it within 0.2–0.4 s.
+- **Airflow code:** CFM = 50 + 10 × code for codes 1, 3, … 13 (60–180 CFM), and 200 CFM is code 16.
+- **Rest cycle:** with ASHRAE below 60 min/h, the ERV stops the fans for the rest of each hour
+  and reports `FE`/`FE` as the airflow while on. It runs the cycle itself.
+- **Power on:** the wall control sends a full snapshot (power, both airflows, ASHRAE), because the
+  ERV zeroes `01`/`11` while off.
+- **Boost:** the ERV times it (60 min) and restores the airflow on its own. Cancelling early is
+  `20 = 0` plus an explicit airflow restore in `00`.
+- **`B1`:** whole degrees Celsius; the panel converts to °F. Readings drift to the air inside
+  the unit while the fans are stopped.
+
+Not yet seen to change: `30`/`F0` (always `00000000`), `31`/`A1` (`00000000`), `F1`
+(`00003E00`). Unknown: the 3 s Filter reset, sub-zero temperatures, the ASHRAE range limits.
+
+The full decode with the evidence for each point is in [CLAUDE.md](../CLAUDE.md#verified-protocol) and
+the [capture notes](../captures/).
+
+## Decoding a capture
+
+`tools/decode.py` takes a Saleae **analog** CSV export (columns named `RXD` and `TXD`), finds each
+line's rails, re-thresholds at mid-swing and decodes inverted 8E1 with parity, stop-bit and BCC
+checks. Anything under 100 % means wrong parameters or a bad capture, not a noisy bus.
+
+```bash
+./tools/decode.py --edges captures/2025-12-14/derived --start 6.8            # from committed edges
+./tools/decode.py --edges captures/2025-12-14/derived --start 6.8 --changes  # register changes only
+./tools/decode.py captures/YYYY-MM-DD/analog.csv --save-edges captures/YYYY-MM-DD/derived
+```
+
+Capture analog (1.25 MS/s is plenty), keep ≥1 s either side of an action and ≥3 s between
+presses, and note a timestamp for every press. `captures/2025-12-14/Session 0.sal` is the original
+capture; its 645 MB analog export is gitignored, and `derived/` reproduces the decode without it.
+
+## Wall control hardware
+
+Photo: [pcb.jpg](../pcb.jpg).
+
+- 4-wire link on `CN2`: `5V`, `0V`, `RXD`, `TXD`. The ERV powers the wall control.
+- PCB `PCB-86ERV-M-V1.1` (2020/08/21), sticker `SW20VE111D`. MCU at U1 marked `0257 231014`.
+- `J1` 4-pin header: TOOL0, RESET, +5V, GND. `CN1` 5-pin header, unpopulated.
+- No RS-485 or CAN transceiver: the lines go almost directly to the MCU.
+- Buttons: On/Off, Boost, In/Out (inside/outside readings), Time, Set, Up, Down, Filter (hold
+  3 s to reset), Vent (airflow settings).

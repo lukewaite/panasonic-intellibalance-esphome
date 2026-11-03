@@ -20,7 +20,8 @@ power-on in the logs after an outage or board power-up is that, not a stray inte
 ## Layout
 
 ```
-README.md                       Public overview: what works, board, firmware, protocol summary
+README.md                       Short public overview with pointers
+docs/protocol.md                Public protocol summary and decoding how-to (keep in step with the section below)
 pcb.jpg                         Wall control PCB photo (2.7 MB)
 tools/decode.py                 The decoder. Stdlib only, no dependencies.
 hardware/STATUS.md              Rev A orders, what's not done yet, arrival + bring-up checklist — START HERE
