@@ -330,7 +330,8 @@ interval:
           // Not recorded in want_on: that only follows changes the ERV reports.
           static int8_t linked = -1;
           bool now_linked = lines[1].last_end && now - lines[1].last_end < 10000;
-          if (now_linked != linked) {
+          // At boot, give the ERV the same 10 s before calling it missing.
+          if (now_linked != linked && (lines[1].last_end || now > 10000)) {
             linked = now_linked;
             id(erv_connected).publish_state(now_linked);
             if (!now_linked) {
