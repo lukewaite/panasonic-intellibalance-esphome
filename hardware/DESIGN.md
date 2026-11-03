@@ -234,7 +234,11 @@ Firmware must set `esp32: flash_size: 8MB`; ESPHome otherwise assumes a 4 MB par
 ### Connectors and test points
 
 - **J1 "ERV"** and **J2 "WALL CONTROL"**: fixed 4-position 5.08 mm screw terminals (THT,
-  hand-soldered), order `5V 0V RXD TXD`, the same as the wall control's CN2.
+  hand-soldered). Pins 1–4 carry bus 5V, GND, RXD (commands) and TXD (state), but are printed
+  `5V 0V TXD RXD`: the ERV's and wall control's own terminal labels, which are the reverse of this
+  repo's line names (CLAUDE.md "Wiring"), so the board wires label-to-label. J3's pRX/eRX/eTX/pTX
+  keep the repo's names: pRX/eRX are on the pin printed `TXD`. Boards from the 2026-10-10 order are
+  printed `5V 0V RXD TXD` and are wired crossed.
 - **J3**: 1×8 2.54 mm header (THT): GND, 3.3 V, the four bus nets (panel RXD, ERV RXD, ERV TXD,
   panel TXD) and the two driver drains (Q2, Q3), so the intercept outputs can be checked with the
   relay still in passthrough. For clipping on the Saleae.

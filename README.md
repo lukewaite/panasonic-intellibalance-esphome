@@ -22,6 +22,3 @@ What it does:
 | [`hardware/bom-digikey.csv`](hardware/bom-digikey.csv) | The hand-soldered parts, enclosure and standoffs. |
 | [`hardware/STATUS.md`](hardware/STATUS.md) | Build notes and a bring-up checklist. |
 | [`docs/protocol.md`](docs/protocol.md) | How the ERV and wall control talk, and how to decode a capture. |
-
-> **Wire the data lines crossed.** The terminal labelled `TXD` at the ERV and the wall control goes
-> to the board's `RXD`, and `RXD` to `TXD`, on both sides of the board.

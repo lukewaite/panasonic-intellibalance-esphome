@@ -99,8 +99,12 @@ cd hardware/kicad/gen
 python3 gen_sch.py                       # schematic (ervlink.kicad_sch)
 KPY=/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3
 $KPY gen_pcb.py                          # place, autoroute (Freerouting via mise java), pour
+$KPY gen_pcb.py --silk-only              # silkscreen text change only: edits SILK strings in place
 $KPY gen_fab.py                          # fab/: gerber zip, JLCPCB BOM + CPL
 ```
+
+Freerouting is not deterministic: a full `gen_pcb.py` run reroutes every track. For a change to
+existing silkscreen text, use `--silk-only` so the copper stays as ordered.
 
 `kicad-cli` is at `/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli`. Freerouting 2.4.1 jar
 is at `~/.local/share/freerouting/`, needs Java 25 (`hardware/kicad/mise.toml`). `gen_fab.py`
@@ -112,18 +116,18 @@ placement preview; re-check the preview after any footprint change.
 4-conductor thermostat-style link on `CN2`: `5V`, `0V`, `RXD`, `TXD`.
 
 > **The physical terminal labels are the reverse of the line names used everywhere in this repo.**
-> Established 2026-10-29 with the rev A board: wired label-to-label, the wall control's commands
+> Established 2026-10-29 with the rev A board (original silkscreen): wired label-to-label, the wall control's commands
 > arrived on the board's TXD tap and its RXD tap saw nothing. The conductor on the terminal
 > **labelled `TXD`** (at the ERV and at the wall control) carries the **commands** — CN2 sits on the
 > wall control's PCB, so its labels are the panel's point of view. In this repo "RXD" always means
 > the command line (wall control → ERV, 4.7 V) and "TXD" the state line (ERV → wall control), as
 > in the 2025-12-14 capture, the decoder and the firmware.
 >
-> **So the rev A board's `RXD`/`TXD` screw terminals (J1 and J2) are wired crossed: the ERV's and
-> the wall control's `TXD` terminal → board `RXD`, their `RXD` terminal → board `TXD`.** Do it on
-> both J1 and J2, never one side only (the relay connects J1 straight to J2). Wired label-to-label,
-> passthrough still works, but the 4.7 V commands land on the 1.16 V TXD tap, the 2.3 V state never
-> reaches the 2.36 V RXD tap, and in intercept the command driver would fight the ERV's output.
+> **The board's J1/J2 silkscreen matches the ERV's and the wall control's terminal labels, so wire
+> label-to-label.** Pin 3 is printed `TXD` and carries the repo's RXD (command) net; pin 4 is
+> printed `RXD` and carries the TXD (state) net. Net names, schematic, firmware and the J3 probe
+> labels (pRX/eRX/eTX/pTX/dRX/dTX) keep the repo's line names. Boards from the 2026-10-10 order
+> predate this and are printed with the line names; see `hardware/STATUS.md`.
 
 Logic analyzer mapping used in the 2025-12-14 capture: `D2` = TXD (red), `D3` = RXD (orange),
 ground to `0V`. In the CSV exports, column 1 = RXD, column 2 = TXD.

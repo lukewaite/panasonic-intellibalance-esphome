@@ -8,9 +8,14 @@ Run with KiCad's bundled Python (it provides `pcbnew`):
 Steps: export the netlist with kicad-cli, place footprints from the PLACE table,
 draw the outline and antenna keep-out, export Specctra DSN, autoroute with
 Freerouting, import the session, add GND pours on both layers, fill, save.
+
+`--silk-only` instead rewrites just the silkscreen texts (SILK) on the existing
+board. Use it for a text-only change: Freerouting is not deterministic, so a full
+run reroutes every track.
 """
 import math
 import os
+import re
 import subprocess
 import sys
 
@@ -98,7 +103,12 @@ SILK = [  # (text, x, y, size_mm, justify)  JLCPCB minimum: 1.0 mm high, 0.15 mm
     ("JP1: NOT WITH USB", 32.6, 39.5, 1.0, "l"), ("PWR", 90.5, 37.0, 1.0, "l"),
     ("INT", 22.8, 27.0, 1.0, "l"),
 ] + [(t, x, 44.6, 1.2, "c") for x0 in (10.0, 36.0)
-     for t, x in zip(("5V", "0V", "RXD", "TXD"), (x0 + 5.08 * i for i in range(4)))] \
+     # Printed as the ERV's and wall control's own terminal labels, so the board wires
+     # label-to-label. Those labels are the reverse of the net names: pin 3 is the
+     # command line (net *_RXD) on the terminal labelled TXD, pin 4 the state line
+     # (net *_TXD) on the terminal labelled RXD. Boards from the 2026-10-10 order
+     # carry the net names here instead and must be wired crossed.
+     for t, x in zip(("5V", "0V", "TXD", "RXD"), (x0 + 5.08 * i for i in range(4)))] \
   + [(t, 13.0, 14.0 + 2.54 * i, 1.0, "l")
      for i, t in enumerate(("GND", "3V3", "pRX", "eRX", "eTX", "pTX", "dRX", "dTX"))]
 
@@ -301,17 +311,55 @@ def build_board():
             if p.GetNetname() == "/GND" and p.GetAttribute() == pcbnew.PAD_ATTRIB_SMD:
                 p.SetLocalZoneConnection(pcbnew.ZONE_CONNECTION_FULL)
 
-    for text, x, y, size, just in SILK:
+    for item in SILK:
         t = pcbnew.PCB_TEXT(board)
-        t.SetText(text)
-        t.SetPosition(pt(x, y))
-        t.SetLayer(pcbnew.F_SilkS)
-        t.SetTextSize(pcbnew.VECTOR2I(mm(size), mm(size)))
-        t.SetTextThickness(mm(max(0.15, size * 0.15)))
-        t.SetHorizJustify({"l": pcbnew.GR_TEXT_H_ALIGN_LEFT, "r": pcbnew.GR_TEXT_H_ALIGN_RIGHT,
-                           "c": pcbnew.GR_TEXT_H_ALIGN_CENTER}[just])
+        set_silk(t, *item)
         board.Add(t)
     return board, netinfo
+
+
+def set_silk(t, text, x, y, size, just):
+    t.SetText(text)
+    t.SetPosition(pt(x, y))
+    t.SetLayer(pcbnew.F_SilkS)
+    t.SetTextSize(pcbnew.VECTOR2I(mm(size), mm(size)))
+    t.SetTextThickness(mm(max(0.15, size * 0.15)))
+    t.SetHorizJustify({"l": pcbnew.GR_TEXT_H_ALIGN_LEFT, "r": pcbnew.GR_TEXT_H_ALIGN_RIGHT,
+                       "c": pcbnew.GR_TEXT_H_ALIGN_CENTER}[just])
+
+
+def update_silk():
+    """--silk-only: change the text of the board's SILK labels in the saved file.
+
+    Freerouting is not deterministic, so a full run reroutes every track; and a
+    pcbnew load/save reserializes the whole file. For a text-only change, edit the
+    strings of the existing F.SilkS gr_text items in place, matched by position,
+    so nothing else in the file changes. Adding or moving a label still needs a
+    full run.
+    """
+    want = {(round(OX + x, 4), round(OY + y, 4)): text for text, x, y, _, _ in SILK}
+    src = open(PCB, encoding="utf-8").read()
+    pat = re.compile(r'(\t\(gr_text )"((?:[^"\\]|\\.)*)"(\n\t\t\(at ([-\d.]+) ([-\d.]+)[^)]*\)\n'
+                     r'\t\t\(layer "F\.SilkS"\))')
+    seen, changed = set(), 0
+
+    def sub(m):
+        nonlocal changed
+        key = (round(float(m.group(4)), 4), round(float(m.group(5)), 4))
+        if key not in want:
+            raise SystemExit(f"silk text {m.group(2)!r} at {key} is not in SILK; run a full build")
+        seen.add(key)
+        if m.group(2) == want[key]:
+            return m.group(0)
+        changed += 1
+        return f'{m.group(1)}"{want[key]}"{m.group(3)}'
+
+    out = pat.sub(sub, src)
+    if seen != set(want):
+        raise SystemExit(f"SILK has labels not on the board: {sorted(set(want) - seen)}; run a full build")
+    with open(PCB, "w", encoding="utf-8") as f:
+        f.write(out)
+    print(f"silk: {changed} text(s) changed; wrote", os.path.relpath(PCB))
 
 
 def add_via(board, pos, net, size=0.6, drill=0.3):
@@ -540,6 +588,9 @@ def frange(a, b, step):
 
 
 def main():
+    if "--silk-only" in sys.argv:
+        update_silk()
+        return
     board, netinfo = build_board()
     if "--no-route" not in sys.argv:
         autoroute(board)

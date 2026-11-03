@@ -13422,7 +13422,7 @@
 			)
 		)
 	)
-	(gr_text "RXD"
+	(gr_text "TXD"
 		(at 120.16 104.6 0)
 		(layer "F.SilkS")
 		(uuid "fe7bf17a-0a9e-4813-93d1-cc37a0edbe0e")
@@ -13433,7 +13433,7 @@
 			)
 		)
 	)
-	(gr_text "TXD"
+	(gr_text "RXD"
 		(at 125.24 104.6 0)
 		(layer "F.SilkS")
 		(uuid "f69138d1-0ac8-4834-8829-217ff2a6197f")
@@ -13477,7 +13477,7 @@
 			)
 		)
 	)
-	(gr_text "RXD"
+	(gr_text "TXD"
 		(at 146.16 104.6 0)
 		(layer "F.SilkS")
 		(uuid "1c76335f-3fa1-49b2-9cf2-a2fdacdd864e")
@@ -13488,7 +13488,7 @@
 			)
 		)
 	)
-	(gr_text "TXD"
+	(gr_text "RXD"
 		(at 151.24 104.6 0)
 		(layer "F.SilkS")
 		(uuid "fbb93d13-877b-4548-9ba3-1b6df8cddb6f")

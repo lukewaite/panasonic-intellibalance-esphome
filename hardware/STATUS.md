@@ -65,9 +65,8 @@ a short 4-conductor thermostat-wire jumper from the ERV terminals to J1.
   frames for 3 cycles, relay out) disturbed nothing, and "Turn on" started the ERV at 120/120,
   0.5 s after the press. Details: `captures/2026-10-30/2026-10-30-notes.md`.
 - Installed unpowered: the wall control worked exactly as before (passthrough proven).
-- **Wire the data lines crossed** — the ERV's and the wall control's `TXD` terminal goes to the
-  board's `RXD`, and vice versa, on both J1 and J2. Label-to-label puts the commands on the TXD
-  tap and nothing on the RXD tap. See CLAUDE.md "Wiring".
+- Boards from the 2026-10-10 order (installed board 1 among them) carry the old J1/J2 labels, so
+  wire those crossed; the silkscreen was changed to match the ERV's terminals on 2026-11-02.
 - **A blank ESP32-C6 module boot-loops** (`invalid header: 0xffffffff`, USB drops every ~2.5 s),
   so the browser's serial picker can't hold the port. Put it in download mode first:
   `esptool --chip esp32c6 --port /dev/cu.usbmodem* --after no-reset flash-id` (or short the BOOT
@@ -98,7 +97,7 @@ short pins through the board), SW1, K1, then J1 and J2.
 
 ### 3. Meter checks, unpowered
 
-- Each J1 pin beeps to the same J2 pin (5V–5V, 0V–0V, RXD–RXD, TXD–TXD), through the relay's NC
+- Each J1 pin beeps to the same J2 pin (5V–5V, 0V–0V, TXD–TXD, RXD–RXD), through the relay's NC
   contacts for RXD and TXD.
 - No adjacent pins short on J1 or J2.
 - Board 5V and 3V3 (J3 pin 2) are not shorted to GND.
@@ -112,7 +111,8 @@ With no power the relay rests in passthrough, so this is a plain wiring change.
 1. **Switch the ERV off at mains** before touching the terminals (5V is live; a slip onto 0V shorts
    the ERV's supply).
 2. Short jumper from the ERV's terminal block to **J1 "TO ERV"**; the existing wall-control run to
-   **J2 "TO WALL CONTROL"**. Order on both: 5V 0V RXD TXD, same as CN2.
+   **J2 "TO WALL CONTROL"**. Wire label-to-label: each conductor to the board terminal printed
+   like the one it came from.
 3. Power the ERV. **The wall control must behave exactly as before.**
 4. Saleae, analog, ≥1.25 MS/s like the 2025-12-14 capture: GND → J3 GND; channels on J3 **pRX,
    eRX, eTX, pTX**. Ignore dRX/dTX (driver outputs, idle when unpowered).
