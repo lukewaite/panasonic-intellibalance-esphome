@@ -465,7 +465,7 @@ void Core::set_relay_(bool v) {
 }
 
 // Merge the pending requests into one command, as the wall control would send it
-// (2026-10-29 session, CLAUDE.md), and start an intercept if there is anything to send.
+// (2026-10-29 session, docs/protocol.md), and start an intercept if there is anything to send.
 void Core::start_request_(uint32_t now) {
   int8_t rp = req_power_, rb = req_boost_;
   uint8_t rs = req_supply_, re = req_exhaust_, ra = req_ashrae_;

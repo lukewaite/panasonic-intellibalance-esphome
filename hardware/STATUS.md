@@ -121,7 +121,7 @@ With no power the relay rests in passthrough, so this is a plain wiring change.
 6. Decode (see the decode.py note above). Expect 100 % BCC/parity/stop on every channel.
 7. **Measure eTX's high level.** That's the ERV's TXD at the ERV end on a clean ground. If it is
    well above 2.3 V, the TXD tap's threshold (51 k / 10 k reference) needs changing before powering
-   the board. Compare all levels with the July decode in CLAUDE.md.
+   the board. Compare all levels with docs/protocol.md.
 
 ### 5. Bench test on USB (ERV disconnected)
 

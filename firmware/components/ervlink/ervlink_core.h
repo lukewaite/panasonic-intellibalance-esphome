@@ -9,7 +9,7 @@
 //
 // Frame: 02 | A1 A0 | D7..D0 | 03 | BCC, ASCII hex, BCC = ~(XOR of A1..ETX).
 // The 8 data chars are 4 bytes, each sent LOW NIBBLE FIRST: "3103F0B4" = 13 30 0F 4B.
-// Register map: CLAUDE.md "Register map".
+// Register map and quirks: docs/protocol.md.
 
 #include <cstddef>
 #include <cstdint>

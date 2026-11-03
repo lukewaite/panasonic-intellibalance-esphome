@@ -9,7 +9,7 @@ lines have very different active levels (RXD reaches ~4.7 V, TXD only ~2.3 V), s
 no single digital threshold suits both. Edges are also RC-limited (~80 us slew on
 a 208 us bit), so an off-centre threshold introduces a duty-cycle skew that shifts
 the sampling points and corrupts the decode. Thresholds are measured per channel
-from the capture itself, so a fresh capture needs no code changes. See CLAUDE.md.
+from the capture itself, so a fresh capture needs no code changes. See docs/protocol.md.
 
 Usage
 -----
