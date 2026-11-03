@@ -2,7 +2,7 @@
 #
 # Reads both lines of the ERV <-> wall control link through the comparator taps and
 # publishes every register to Home Assistant. The relay stays in hardware passthrough
-# except for short intercepts to send a command (v11):
+# except for short intercepts to send a command (v12):
 #   Power and Boost (switches), Supply/Exhaust airflow, ASHRAE (selects):
 #     ~1.4 s each, sending the wall control's command frames for that button for 3 cycles,
 #     then 2 idle.
@@ -117,9 +117,6 @@ globals:
   - {id: saved_supply, type: uint8_t, restore_value: true, initial_value: "7"}
   - {id: saved_exhaust, type: uint8_t, restore_value: true, initial_value: "7"}
   - {id: saved_ashrae, type: uint8_t, restore_value: true, initial_value: "3"}
-  # Whether the ERV should be running: its power state, as last changed by the wall control or
-  # HA. The "off" the ERV comes back with after an outage isn't a choice, so it is not recorded.
-  - {id: want_on, type: bool, restore_value: true, initial_value: "true"}
 
 interval:
   # One frame is 13 bytes x 2.29 ms; the 512-byte buffers hold ~1 s. Normally this runs
@@ -154,16 +151,34 @@ interval:
           // up), or as the board itself starting from a power-on or brownout reset (it shares
           // the outage; an OTA or crash reboot doesn't count). Until the ERV is seen running
           // again its "off" is the outage, not a choice, and the resume checks run.
+          // Also when the ERV talks again after >10 s of silence (linked 0 -> 1), in case the
+          // single burst frame was lost: harmless if it wasn't an outage, as want_on is accurate.
           static bool powerup = false, boot_checked = false;
           static uint32_t powerup_at = 0, next_try = 0;
           static uint8_t tries_left = 0;
+          static int8_t linked = -1;  // ERV state line: -1 not yet known, 0 silent, 1 live
           auto arm_resume = [&](const char *why) {
+            if (powerup && tries_left) return;  // already armed
             ESP_LOGI("ervlink", "mains power-up (%s)", why);
             powerup = true;
             powerup_at = millis();
             next_try = powerup_at + 10000;
             tries_left = 3;
           };
+          // Whether the ERV should be running: its power state as last reported, except the
+          // "off" it comes back with after an outage. Kept in its own preference so a change
+          // reaches flash at once (a restore_value global is only queued for saving once a
+          // second, then flushed once a minute: an outage can follow sooner).
+          static ESPPreferenceObject want_pref =
+              global_preferences->make_preference<bool>(fnv1_hash("ervlink_want_on"), true);
+          static bool want_on = true, want_loaded = false;
+          if (!want_loaded) {
+            want_loaded = true;
+            if (!want_pref.load(&want_on)) want_on = true;
+          }
+          // The intercept's state (used here by the resume check, run further down).
+          enum Phase { IDLE, WAIT_IN, ACTIVE, WAIT_OUT };
+          static Phase phase = IDLE;
 
           auto dump = [](const uint8_t *b, size_t n) {
             std::string s;
@@ -225,6 +240,7 @@ interval:
               return;
             }
             (*L.frames)++;
+            if (L.name[0] == 'T' && linked == 0) arm_resume("ERV talking again after silence");
             if (!boot_checked) {
               boot_checked = true;
               auto why = esp_reset_reason();
@@ -270,9 +286,10 @@ interval:
               bool was_known = power_known, was_on = on;
               power_known = true;
               on = b[0] != 0;
-              if (was_known && on != was_on && !(powerup && !on) && on != id(want_on)) {
-                id(want_on) = on;
-                global_preferences->sync();  // now, not at the next 1 min flush: an outage may follow
+              if (!(powerup && !on) && on != want_on) {
+                want_on = on;
+                want_pref.save(&want_on);
+                global_preferences->sync();
                 ESP_LOGI("ervlink", "remembered: the ERV should be %s", on ? "on" : "off");
               }
               if (on) powerup = false;
@@ -327,8 +344,7 @@ interval:
           // No state from the ERV for 10 s: it is unpowered or disconnected. Report it as off
           // (so "off for 10 minutes" alerts still fire) with no readings, refuse commands, and
           // forget the last registers so the ERV's first frames on return are decoded afresh.
-          // Not recorded in want_on: that only follows changes the ERV reports.
-          static int8_t linked = -1;
+          // Not recorded in want_on: that only follows what the ERV reports.
           bool now_linked = lines[1].last_end && now - lines[1].last_end < 10000;
           // At boot, give the ERV the same 10 s before calling it missing.
           if (now_linked != linked && (lines[1].last_end || now > 10000)) {
@@ -346,7 +362,9 @@ interval:
               id(airflow_exhaust).publish_state(NAN);
               id(ashrae).publish_state(NAN);
               id(boost_duration).publish_state(NAN);
-              for (auto *t : {id(reg_txd_01), id(reg_txd_11), id(reg_txd_21), id(reg_txd_b1)}) t->state = "";
+              for (auto *t : {id(reg_txd_01), id(reg_txd_11), id(reg_txd_21), id(reg_txd_31),
+                              id(reg_txd_a1), id(reg_txd_b1), id(reg_txd_f1)})
+                t->publish_state("");
             }
           }
 
@@ -363,11 +381,15 @@ interval:
 
           // Resume after a power failure: the ERV came back off, but it should be on. Up to 3
           // tries, 30 s apart, in case the ERV wasn't ready; waits up to 2 min for its state.
+          // A try counts only when it starts an intercept, not while one is still under way.
+          if (power_known && on) powerup = false;
           if (tries_left && (int32_t) (now - next_try) >= 0) {
             if (!power_known) {
               if (now - powerup_at > 120000) tries_left = 0; else next_try = now + 5000;
-            } else if (on || !id(want_on) || !id(resume_switch).state) {
+            } else if (on || !want_on || !id(resume_switch).state) {
               tries_left = 0;
+            } else if (phase != IDLE || id(req_power) >= 0) {
+              next_try = now + 1000;
             } else {
               tries_left--;
               next_try = now + 30000;
@@ -395,8 +417,6 @@ interval:
           // F1). The relay switches both lines at once and needs a few ms, so it switches
           // only inside a gap, judged from when the last cycle's final frame completed. UART
           // receive latency (a few ms) is covered by the 20 ms margin.
-          enum Phase { IDLE, WAIT_IN, ACTIVE, WAIT_OUT };
-          static Phase phase = IDLE;
           static HighFrequencyLoopRequester fast;
           static uint8_t cycles = 0, sent = 0;
           static uint32_t t_req = 0, t_next = 0, t_rx00 = 0, t_on = 0;
