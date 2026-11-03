@@ -65,15 +65,20 @@ struct Hooks {
   // Persist. Called only while the link is free (a flash commit takes tens of ms).
   std::function<void(bool)> save_want;
   std::function<void(const Settings &)> save_settings;
+  // A resume in progress, so a reset in the middle of it (a brownout as the relay goes in)
+  // carries on with the tries left instead of starting over: 0 none, else 1 + tries made.
+  std::function<void(uint8_t)> save_resume;
   std::function<bool()> resume_enabled;  // the "Resume after power failure" switch
   std::function<void(int level, const char *msg)> log;  // 0 error, 1 warning, 2 info
 };
 
 class Core {
  public:
-  // now: ms since boot when listening starts. want_on/saved: as persisted. board_power_reset:
-  // the board itself just powered up (power-on, brownout or power-glitch reset).
-  Core(Hooks hooks, bool want_on, Settings saved, bool board_power_reset, uint32_t now);
+  // now: ms since boot when listening starts. want_on/saved/resume_mark: as persisted.
+  // board_power_reset: the board itself just powered up (power-on, brownout or power-glitch
+  // reset).
+  Core(Hooks hooks, bool want_on, Settings saved, uint8_t resume_mark, bool board_power_reset,
+       uint32_t now);
 
   void feed(Line line, uint8_t c, uint32_t now);  // one received byte
   void tick(uint32_t now);                        // call after feeding, every loop
@@ -104,7 +109,8 @@ class Core {
     uint8_t buf[13];
     uint8_t len = 0;
     char last[3] = "";      // address of the last good frame
-    uint32_t last_end = 0;  // when it completed
+    uint32_t last_end = 0;  // when it was seen complete
+    uint32_t last_late = 0;  // how much earlier it may have completed (time since the previous tick)
     Stats stats;
   };
   enum Phase { IDLE, WAIT_IN, ACTIVE, WAIT_OUT };
@@ -114,6 +120,7 @@ class Core {
   void remember_(bool v);
   void arm_resume_(const char *why, uint32_t t);
   void end_resume_(const char *why);
+  void mark_resume_(uint8_t m);
   void start_request_(uint32_t now);
   void set_relay_(bool v);
   int gap_left_(Line l, const char *end1, const char *end2, int gap, uint32_t now) const;
@@ -133,7 +140,8 @@ class Core {
   int8_t linked_ = -1;  // ERV state line: -1 not yet known, 0 silent, 1 live
 
   // Resume after a mains outage (see tick()).
-  bool want_on_, save_want_ = false;
+  bool want_on_, save_want_ = false, save_resume_ = false;
+  uint8_t resume_mark_ = 0;
   Settings saved_;
   bool board_power_reset_, boot_checked_ = false, powerup_ = false;
   uint32_t listen_from_, powerup_at_ = 0, next_try_ = 0;
@@ -148,7 +156,7 @@ class Core {
   Phase phase_ = IDLE;
   bool relay_ = false;
   uint8_t cycles_ = 0, sent_ = 0;
-  uint32_t t_req_ = 0, t_next_ = 0, t_rx00_ = 0, t_on_ = 0;
+  uint32_t t_req_ = 0, t_next_ = 0, t_rx00_ = 0, t_on_ = 0, last_tick_ = 0;
   uint8_t c00_[4], c10_[4], c20_[4];  // the command; FF = leave this byte alone
   bool has_cmd_ = false;
   const char *what_ = "";

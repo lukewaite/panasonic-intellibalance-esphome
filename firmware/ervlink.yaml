@@ -1,4 +1,4 @@
-# ervlink — firmware for the rev A inline interface board (v14).
+# ervlink — firmware for the rev A inline interface board (v15).
 #
 # Reads both lines of the ERV <-> wall control link through the comparator taps and
 # publishes every register to Home Assistant. The relay stays in hardware passthrough
@@ -54,7 +54,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/lukewaite/panasonic-intellibalance-esphome
-      ref: fw-v14
+      ref: fw-v15
       path: firmware/components
     components: [ervlink]
 
@@ -127,10 +127,13 @@ interval:
   - interval: 1ms
     then:
       - lambda: |-
-          // Whether the ERV should be running, in its own preference: the core asks for it
-          // to be committed at once, not at the next scheduled flash write.
+          // Whether the ERV should be running, and a resume in progress, in their own
+          // preferences: the core asks for them to be committed at once, not at the next
+          // scheduled flash write.
           static ESPPreferenceObject want_pref =
               global_preferences->make_preference<bool>(fnv1_hash("ervlink_want_on"), true);
+          static ESPPreferenceObject resume_pref =
+              global_preferences->make_preference<uint8_t>(fnv1_hash("ervlink_resume"), true);
           if (id(erv) == nullptr) {
             using ervlink::Out;
             ervlink::Hooks h;
@@ -181,6 +184,10 @@ interval:
               want_pref.save(&v);
               global_preferences->sync();
             };
+            h.save_resume = [](uint8_t m) {
+              resume_pref.save(&m);
+              global_preferences->sync();
+            };
             h.save_settings = [](const ervlink::Settings &s) {
               id(saved_supply) = s.supply;
               id(saved_exhaust) = s.exhaust;
@@ -194,10 +201,12 @@ interval:
             };
             bool want_on = true;
             if (!want_pref.load(&want_on)) want_on = true;
+            uint8_t resume_mark = 0;
+            if (!resume_pref.load(&resume_mark)) resume_mark = 0;
             auto why = esp_reset_reason();
             bool power_reset = why == ESP_RST_POWERON || why == ESP_RST_BROWNOUT || why == ESP_RST_PWR_GLITCH;
             id(erv) = new ervlink::Core(h, want_on, {id(saved_supply), id(saved_exhaust), id(saved_ashrae)},
-                                        power_reset, millis());
+                                        resume_mark, power_reset, millis());
           }
           uint32_t now = millis();
           uint8_t c;

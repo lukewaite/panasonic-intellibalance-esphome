@@ -76,10 +76,13 @@ don't reach for numpy (not installed). Columns: `Time [s], RXD, TXD`.
 
 All behaviour lives in `firmware/components/ervlink/ervlink_core.{h,cpp}` (no ESPHome
 dependencies). **Change it test-first:** `cd firmware && mise run test` builds the host tests with
-ASan/UBSan and runs them in about a second. `test/sim.h` simulates both devices at byte timing
-(cycles, drift, the wall control's power-up burst and 2.1 s boot silence, relay routing), plus
-mains outages, board reboots with a chosen boot delay and reset reason, and dead taps. Add a
-scenario there before fixing a bug; it is how the v13 shared-outage bug was found.
+ASan/UBSan and runs them in a few seconds. `test/sim.h` simulates both devices at byte timing:
+cycles and drift, the wall control's power-up burst and 2.1 s boot silence, the ERV's ASHRAE
+rest and boost timer (with a scalable ERV minute), its 0.3 s apply delay, relay routing with a
+5 ms operate window, mains outages that cut frames short, wall-control-only restarts, board
+reboots (chosen boot delay and reset reason, brownout on relay-in), loop stalls, 512-byte UART
+buffers, dead taps and a millis() offset. Add a scenario before fixing a bug, and check the test
+fails without the fix (break the fix, rerun): that is how the v13 and v14 bugs were found.
 
 The YAML loads the component from GitHub at a tag (`external_components` → `ref: fw-vNN`). To
 deploy: commit, tag `fw-vNN`, push the tag, bump `ref` (and the version in the header) in the

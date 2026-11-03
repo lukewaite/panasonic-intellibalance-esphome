@@ -5,7 +5,13 @@
 // control 5 frames every 200.1 ms, ERV 4 every 200.2 ms with A1 B1 F1 every 5th cycle,
 // frames 29.7 ms apart, 2.292 ms per byte). The board's taps see the wall control's RXD and
 // the ERV's TXD; the ERV hears the wall control while the relay is out and the board while
-// it is in. The board's loop runs every 16 ms, or every 1 ms while an intercept is busy.
+// it is in, and applies a command 0.3 s after hearing it. The board's loop runs every 16 ms,
+// or every 1 ms while an intercept is busy, and feeds all buffered RXD bytes, then all TXD
+// bytes, as the YAML does; each UART buffers at most 512 bytes.
+//
+// The ERV runs its ASHRAE cycle (rest for the rest of each hour, reported as FE/FE) and times
+// boost (60 min, then back to the setting and a fresh cycle), with `minute` of simulated time
+// per ERV minute so tests can run them quickly.
 
 #include <cmath>
 #include <cstdio>
@@ -26,14 +32,15 @@ using ervlink::RXD;
 using ervlink::TXD;
 
 constexpr uint64_t MS = 1000;
+constexpr uint64_t BYTE_US = 2292;
+constexpr uint64_t FRAME_SPACING_US = 29700;
+constexpr size_t UART_BUFFER = 512;
 
 // Every core log line of the current test, printed by the runner when it fails.
 inline std::vector<std::string> &test_log() {
   static std::vector<std::string> v;
   return v;
 }
-constexpr uint64_t BYTE_US = 2292;
-constexpr uint64_t FRAME_SPACING_US = 29700;
 
 inline std::vector<uint8_t> make_frame(const char *addr, const uint8_t *v) {
   static const char hex[] = "0123456789ABCDEF";
@@ -53,11 +60,19 @@ struct Erv {
   bool powered = false, deaf = false;
   bool on = false, boost = false;
   uint8_t supply = 0, exhaust = 0, ashrae = 0;
+  uint8_t b1[4] = {0x13, 0x30, 0x0F, 0x4B};  // 19 °C 48 %, 15 °C 75 %
+  uint64_t minute = 60000 * MS;
+  uint64_t cycle_start = 0, boost_until = 0;
   uint64_t next = 0;
   int cycle = 0;
   int commands = 0;  // frames that changed something
 
-  void apply(const std::vector<uint8_t> &f) {
+  bool resting(uint64_t t) const {
+    if (!on || boost || ashrae < 1 || ashrae >= 6) return false;
+    return (t - cycle_start) % (60 * minute) >= ashrae * 10 * minute;
+  }
+
+  void apply(const std::vector<uint8_t> &f, uint64_t t) {
     if (!powered || deaf || f.size() != 13) return;
     auto hv = [](uint8_t c) -> uint8_t { return c <= '9' ? c - '0' : c - 'A' + 10; };
     uint8_t b[4];
@@ -78,24 +93,33 @@ struct Erv {
     } else if (a == "20") {
       if (on && b[0] != 0xFF) boost = b[0] == 1;
     }
+    if (on && !was_on) cycle_start = t;
+    if (ashrae != a0) cycle_start = t;
+    if (boost && !was_boost) boost_until = t + 60 * minute;
+    if (!boost && was_boost) cycle_start = t;  // a fresh run period after boost
     if (on != was_on || boost != was_boost || supply != s0 || exhaust != e0 || ashrae != a0) commands++;
   }
 
-  // The frames of the cycle starting now.
-  std::vector<std::vector<uint8_t>> cycle_frames() {
+  // The frames of the cycle starting at t.
+  std::vector<std::vector<uint8_t>> cycle_frames(uint64_t t) {
+    if (boost && t >= boost_until) {
+      boost = false;
+      cycle_start = t;
+    }
     std::vector<std::vector<uint8_t>> out;
     if (cycle++ % 5 == 4) {
-      const uint8_t z[4] = {0, 0, 0, 0}, b1[4] = {0x13, 0x30, 0x0F, 0x4B}, f1[4] = {0, 0, 0xE3, 0};
+      const uint8_t z[4] = {0, 0, 0, 0}, f1[4] = {0, 0, 0xE3, 0};
       out.push_back(make_frame("A1", z));
       out.push_back(make_frame("B1", b1));
       out.push_back(make_frame("F1", f1));
     } else {
       uint8_t r01[4] = {0, 0, 0, 0}, r11[4] = {0, 0, 0, 0}, r21[4] = {0, 0, 0, 0}, r31[4] = {0, 0, 0, 0};
       if (on) {
-        // Boost reports 200/200 (code 16) as the airflow.
+        // Boost reports 200/200 (code 16) as the airflow, the rest FE/FE.
+        bool rest = resting(t);
         r01[0] = 1;
-        r01[1] = boost ? 16 : supply;
-        r01[2] = boost ? 16 : exhaust;
+        r01[1] = boost ? 16 : rest ? 0xFE : supply;
+        r01[2] = boost ? 16 : rest ? 0xFE : exhaust;
         r11[0] = ashrae;
         r11[1] = boost ? 6 : 0;
         r21[0] = boost;
@@ -151,7 +175,9 @@ struct WallControl {
 struct Flash {
   bool want_on = true;
   ervlink::Settings settings{7, 7, 3};
-  int want_writes = 0;
+  uint8_t resume_mark = 0;
+  int want_writes = 0, settings_writes = 0, resume_writes = 0;
+  int writes_while_relay_in = 0;
 };
 
 struct Sim {
@@ -163,10 +189,14 @@ struct Sim {
 
   // Board.
   std::unique_ptr<ervlink::Core> core;
-  uint64_t boot_at = 0, listen_at = 0;
+  uint64_t boot_at = 0, listen_at = UINT64_MAX;  // powered off until board_boot()
+  uint32_t clock_offset = 0;                      // millis() at boot
   bool relay = false;
   bool tap_dead[2] = {false, false};
   bool corrupt_next_rxd_frame = false;
+  bool brownout_on_relay = false;  // the board resets whenever the relay goes in
+  uint32_t brownout_listen_ms = 300;
+  int resets = 0;
   uint64_t next_loop = 0;
 
   // What the board reported.
@@ -186,10 +216,11 @@ struct Sim {
     bool from_board;
     std::vector<uint8_t> frame;
   };
-  std::multimap<uint64_t, Delivery> erv_rx;
+  std::multimap<uint64_t, Delivery> erv_rx;  // frames completing on the ERV's input
+  std::multimap<uint64_t, std::vector<uint8_t>> erv_apply;  // heard, applied after 0.3 s
   std::deque<std::pair<uint64_t, uint64_t>> wc_frames;  // on-the-wire windows
 
-  uint32_t core_ms() const { return (uint32_t) ((t - boot_at) / MS); }
+  uint32_t core_ms() const { return clock_offset + (uint32_t) ((t - boot_at) / MS); }
 
   // ---- Scenario controls ----
 
@@ -207,10 +238,24 @@ struct Sim {
     erv.supply = erv.exhaust = erv.ashrae = 0;
     erv.next = t + erv_ms * MS;
     erv.cycle = 0;
+    // A few junk bytes as the lines come up.
+    tap_bytes.insert({t + 2 * MS, {RXD, 0x00}});
+    tap_bytes.insert({t + 3 * MS, {TXD, 0x80}});
   }
+  // Frames on the wire are cut short.
   void mains_off() {
     wc.powered = erv.powered = false;
     erv.on = erv.boost = false;
+    tap_bytes.erase(tap_bytes.upper_bound(t), tap_bytes.end());
+    for (auto it = erv_rx.begin(); it != erv_rx.end();)
+      it = it->second.from_board ? std::next(it) : erv_rx.erase(it);
+    erv_apply.clear();
+  }
+  // The wall control alone restarts (the ERV keeps running).
+  void wall_control_reset() {
+    wc.burst = true;
+    wc.next = t + 50 * MS;
+    wc.cmd_cycles = 0;
   }
   // The board starts listening listen_ms after boot.
   void board_boot(uint32_t listen_ms = 300, bool power_reset = false) {
@@ -225,12 +270,24 @@ struct Sim {
     if (relay) set_relay(false);
     listen_at = UINT64_MAX;
   }
+  // The board's loop doesn't run for ms (a flash commit, the radio).
+  void stall(uint32_t ms) { next_loop = t + ms * MS; }
   // ERV running at the given settings, as if set from the wall control long ago.
   void erv_running(uint8_t s, uint8_t e, uint8_t a) {
     erv.on = true;
     erv.supply = wc.supply = s;
     erv.exhaust = wc.exhaust = e;
     erv.ashrae = wc.ashrae = a;
+    erv.cycle_start = t;
+  }
+  // The panel's On/Off button, with the settings it shows (the ERV's, when running).
+  void panel_power(bool p) {
+    if (erv.on && !erv.boost) {
+      wc.supply = erv.supply;
+      wc.exhaust = erv.exhaust;
+      wc.ashrae = erv.ashrae;
+    }
+    wc.press_power(p);
   }
 
   float value(Out o) const {
@@ -257,7 +314,11 @@ struct Sim {
     while (!erv_rx.empty() && erv_rx.begin()->first <= t) {
       auto d = erv_rx.begin()->second;
       erv_rx.erase(erv_rx.begin());
-      if (d.from_board == relay) erv.apply(d.frame);
+      if (d.from_board == relay) erv_apply.insert({t + 300 * MS, d.frame});
+    }
+    while (!erv_apply.empty() && erv_apply.begin()->first <= t) {
+      erv.apply(erv_apply.begin()->second, t);
+      erv_apply.erase(erv_apply.begin());
     }
     while (!wc_frames.empty() && wc_frames.front().second < t) wc_frames.pop_front();
     if (t < listen_at) {
@@ -265,20 +326,30 @@ struct Sim {
       return;
     }
     if (!core) start_core();
-    bool busy = core->busy();
     if (t < next_loop) return;
-    next_loop = t + (busy ? 1 : 16) * MS;
     uint32_t now = core_ms();
+    // The UARTs' buffers, RXD first: at most 512 bytes each, later bytes are lost.
+    std::vector<uint8_t> buf[2];
     while (!tap_bytes.empty() && tap_bytes.begin()->first <= t) {
       auto b = tap_bytes.begin()->second;
       tap_bytes.erase(tap_bytes.begin());
-      if (!tap_dead[b.line]) core->feed(b.line, b.c, now);
+      if (!tap_dead[b.line] && buf[b.line].size() < UART_BUFFER) buf[b.line].push_back(b.c);
     }
+    for (Line l : {RXD, TXD})
+      for (uint8_t c : buf[l]) core->feed(l, c, now);
     core->tick(now);
+    if (pending_brownout) {
+      pending_brownout = false;
+      resets++;
+      board_off();
+      board_boot(brownout_listen_ms, true);
+      return;
+    }
+    next_loop = t + (core->busy() ? 1 : 16) * MS;
   }
 
  private:
-  bool pending_power_reset = false;
+  bool pending_power_reset = false, pending_brownout = false;
 
   void start_core() {
     ervlink::Hooks h;
@@ -294,8 +365,18 @@ struct Sim {
     h.save_want = [this](bool v) {
       flash.want_on = v;
       flash.want_writes++;
+      flash.writes_while_relay_in += relay;
     };
-    h.save_settings = [this](const ervlink::Settings &s) { flash.settings = s; };
+    h.save_settings = [this](const ervlink::Settings &s) {
+      flash.settings = s;
+      flash.settings_writes++;
+      flash.writes_while_relay_in += relay;
+    };
+    h.save_resume = [this](uint8_t m) {
+      flash.resume_mark = m;
+      flash.resume_writes++;
+      flash.writes_while_relay_in += relay;
+    };
     h.resume_enabled = [this]() { return resume_enabled; };
     h.log = [this](int level, const char *m) {
       char line[256];
@@ -303,18 +384,25 @@ struct Sim {
       logs.push_back(line);
       test_log().push_back(line);
     };
-    core.reset(new ervlink::Core(h, flash.want_on, flash.settings, pending_power_reset, core_ms()));
+    core.reset(new ervlink::Core(h, flash.want_on, flash.settings, flash.resume_mark, pending_power_reset,
+                                 core_ms()));
     next_loop = t;
   }
 
+  // The relay's contacts move within RELAY_US of the coil switching (G6S-2: 4 ms max): a wall
+  // control frame on the wire in that window is a violation, including one about to start.
+  static constexpr uint64_t RELAY_US = 5 * MS;
   void set_relay(bool v) {
     if (v == relay) return;
+    bool clash = wc.powered && wc.next < t + RELAY_US;
     for (auto &w : wc_frames)
-      if (w.first <= t && t <= w.second) relay_in_wc_frame++;
+      if (w.first < t + RELAY_US && t <= w.second) clash = true;
+    relay_in_wc_frame += clash;
     if (v) relay_since = t;
     else if (t - relay_since > longest_intercept) longest_intercept = t - relay_since;
     relay = v;
     relay_log.push_back({t, v});
+    if (v && brownout_on_relay) pending_brownout = true;
   }
 
   void send_frames(Line line, uint64_t start, const std::vector<std::vector<uint8_t>> &frames) {
@@ -342,7 +430,7 @@ struct Sim {
       wc.burst = false;
     }
     if (erv.powered && erv.next <= t) {
-      send_frames(TXD, erv.next, erv.cycle_frames());
+      send_frames(TXD, erv.next, erv.cycle_frames(erv.next));
       erv.next += 200200;
     }
   }

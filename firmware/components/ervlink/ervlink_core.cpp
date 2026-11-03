@@ -57,12 +57,22 @@ const char *line_name(Line l) { return l == RXD ? "RXD" : "TXD"; }
 float Core::cfm(uint8_t v) { return v <= 13 ? 50.0f + 10.0f * v : v == 16 ? 200.0f : NAN; }
 bool Core::valid_airflow(uint8_t v) { return (v >= 1 && v <= 13 && v % 2) || v == 16; }
 
-Core::Core(Hooks hooks, bool want_on, Settings saved, bool board_power_reset, uint32_t now)
+Core::Core(Hooks hooks, bool want_on, Settings saved, uint8_t resume_mark, bool board_power_reset,
+           uint32_t now)
     : h_(std::move(hooks)),
       want_on_(want_on),
+      resume_mark_(resume_mark),
       saved_(saved),
       board_power_reset_(board_power_reset),
-      listen_from_(now) {}
+      listen_from_(now),
+      last_tick_(now) {
+  if (resume_mark) {
+    // Reset in the middle of a resume: carry on with the tries left.
+    log_(1, "reset during a resume (%u tries made): carrying on", resume_mark - 1u);
+    arm_resume_("reset during a resume", now);
+    tries_ = resume_mark - 1;
+  }
+}
 
 void Core::log_(int level, const char *fmt, ...) {
   char msg[192];
@@ -83,7 +93,8 @@ void Core::feed(Line which, uint8_t c, uint32_t now) {
     return;
   }
   // Bytes 1..11 are ASCII hex or ETX, never STX, so an STX there means the previous frame
-  // was cut short: count it and resync. Byte 12 (BCC) can be 02.
+  // was cut short: count it and resync. (The BCC, byte 12, always has bit 7 set, as it is the
+  // complement of an XOR of 7-bit bytes, so it is never 02 either.)
   if (c == 0x02 && L.len < 12) {
     L.stats.bad++;
     log_(1, "%s truncated frame: %s", line_name(which), dump(L.buf, L.len).c_str());
@@ -131,6 +142,7 @@ void Core::handle_(Line which, uint32_t t) {
   L.last[1] = f[2];
   L.last[2] = 0;
   L.last_end = t;
+  L.last_late = t - last_tick_;
   std::string addr((const char *) f + 1, 2), data((const char *) f + 3, 8);
   // No command sets all of a register to FF (00 byte 3 and 10/20 bytes 2-3 are always 0).
   if (which == RXD && data == "FFFFFFFF") arm_resume_("wall control burst", t);
@@ -147,6 +159,10 @@ void Core::handle_(Line which, uint32_t t) {
     }
     return;
   }
+  // The ERV is running: whatever started a resume episode, it is over (01 needn't change: the
+  // wall control alone may have restarted, or the RXD tap glitched).
+  if (which == TXD && addr == "01" && data[0] != '0' && powerup_ && power_known_ && on_)
+    end_resume_("the ERV is on");
   std::string &last = regs_[which][addr];
   if (last == data) return;
   log_(2, "%s %s: %s -> %s", line_name(which), addr.c_str(), last.empty() ? "(none)" : last.c_str(),
@@ -245,10 +261,17 @@ void Core::arm_resume_(const char *why, uint32_t t) {
   tries_ = 0;
 }
 
+void Core::mark_resume_(uint8_t m) {
+  if (m == resume_mark_) return;
+  resume_mark_ = m;
+  save_resume_ = true;
+}
+
 void Core::end_resume_(const char *why) {
   if (!powerup_) return;
   log_(2, "resume episode over: %s", why);
   powerup_ = false;
+  mark_resume_(0);
   if (power_known_) remember_(on_);
 }
 
@@ -321,12 +344,16 @@ void Core::tick(uint32_t now) {
       next_try_ = now + 30000;
       log_(1, "ERV off after power-up but it was on: turning it back on");
       req_power_ = 1;
+      // Recorded before the relay goes in, as the try itself may reset the board.
+      mark_resume_(tries_ + 2);
+      h_.save_resume(resume_mark_);
+      save_resume_ = false;
     }
   }
 
   // Save the settings for Power on once 01/11/21 have been unchanged for 5 s with the ERV on
   // and not boosting (boost reports 200/200 in 01, which isn't a setting).
-  if (on_ && !boosting_ && now - settled_since_ > 5000 && valid_airflow(cur_supply_) &&
+  if (phase_ == IDLE && on_ && !boosting_ && now - settled_since_ > 5000 && valid_airflow(cur_supply_) &&
       valid_airflow(cur_exhaust_) && cur_ashrae_ >= 1 && cur_ashrae_ <= 6 &&
       (cur_supply_ != saved_.supply || cur_exhaust_ != saved_.exhaust ||
        cur_ashrae_ != saved_.ashrae)) {
@@ -410,18 +437,24 @@ void Core::tick(uint32_t now) {
     log_(0, "intercept timed out; relay forced out");
   }
 
-  // Commit want_on only while not holding the link.
+  // Commit to flash only while not holding the link.
   if (save_want_ && phase_ == IDLE) {
     save_want_ = false;
     h_.save_want(want_on_);
   }
+  if (save_resume_ && phase_ == IDLE) {
+    save_resume_ = false;
+    h_.save_resume(resume_mark_);
+  }
+  last_tick_ = now;
 }
 
 int Core::gap_left_(Line l, const char *end1, const char *end2, int gap, uint32_t now) const {
   const LineState &L = lines_[l];
   if (L.len != 0) return -1;
+  // The frame may have completed up to last_late before it was seen (a slow or stalled loop).
   if (strcmp(L.last, end1) == 0 || (end2 && strcmp(L.last, end2) == 0))
-    return gap - (int) (now - L.last_end);
+    return gap - (int) (now - L.last_end) - (int) L.last_late;
   return -1;
 }
 
@@ -476,7 +509,9 @@ void Core::start_request_(uint32_t now) {
     snapshot(0);
     what_ = "Power off";
   } else if (rb == 1 && !boosting_) {
-    const uint8_t a[4] = {1, 0xFF, 0xFF, 0}, b[4] = {cur_ashrae_, 6, 0, 0}, c[4] = {1, 0, 0, 0};
+    // 10 byte 0 must carry the ASHRAE setting; before 11 is decoded, the saved one.
+    uint8_t ash = cur_ashrae_ >= 1 && cur_ashrae_ <= 6 ? cur_ashrae_ : saved_.ashrae;
+    const uint8_t a[4] = {1, 0xFF, 0xFF, 0}, b[4] = {ash, 6, 0, 0}, c[4] = {1, 0, 0, 0};
     memcpy(c00_, a, 4);
     memcpy(c10_, b, 4);
     memcpy(c20_, c, 4);
@@ -484,7 +519,8 @@ void Core::start_request_(uint32_t now) {
     what_ = "Boost on";
   } else if (rb == 0 && boosting_) {
     // The wall control's cancel: boost off plus an explicit airflow restore.
-    const uint8_t a[4] = {1, saved_.supply, saved_.exhaust, 0}, b[4] = {cur_ashrae_, 6, 0, 0};
+    uint8_t ash = cur_ashrae_ >= 1 && cur_ashrae_ <= 6 ? cur_ashrae_ : saved_.ashrae;
+    const uint8_t a[4] = {1, saved_.supply, saved_.exhaust, 0}, b[4] = {ash, 6, 0, 0};
     memcpy(c00_, a, 4);
     memcpy(c10_, b, 4);
     memcpy(c20_, ZERO, 4);
