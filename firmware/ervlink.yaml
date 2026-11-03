@@ -2,7 +2,7 @@
 #
 # Reads both lines of the ERV <-> wall control link through the comparator taps and
 # publishes every register to Home Assistant. The relay stays in hardware passthrough
-# except for short intercepts to send a command (v10):
+# except for short intercepts to send a command (v11):
 #   Power and Boost (switches), Supply/Exhaust airflow, ASHRAE (selects):
 #     ~1.4 s each, sending the wall control's command frames for that button for 3 cycles,
 #     then 2 idle.
@@ -324,6 +324,31 @@ interval:
 
           uint32_t now = millis();
 
+          // No state from the ERV for 10 s: it is unpowered or disconnected. Report it as off
+          // (so "off for 10 minutes" alerts still fire) with no readings, refuse commands, and
+          // forget the last registers so the ERV's first frames on return are decoded afresh.
+          // Not recorded in want_on: that only follows changes the ERV reports.
+          static int8_t linked = -1;
+          bool now_linked = lines[1].last_end && now - lines[1].last_end < 10000;
+          if (now_linked != linked) {
+            linked = now_linked;
+            id(erv_connected).publish_state(now_linked);
+            if (!now_linked) {
+              ESP_LOGW("ervlink", "no state from the ERV for 10 s: reporting it off");
+              power_known = on = moving = boosting = false;
+              id(erv_power).publish_state(false);
+              id(ventilating).publish_state(false);
+              id(boost).publish_state(false);
+              id(power_switch).publish_state(false);
+              id(boost_switch).publish_state(false);
+              id(airflow_supply).publish_state(NAN);
+              id(airflow_exhaust).publish_state(NAN);
+              id(ashrae).publish_state(NAN);
+              id(boost_duration).publish_state(NAN);
+              for (auto *t : {id(reg_txd_01), id(reg_txd_11), id(reg_txd_21), id(reg_txd_b1)}) t->state = "";
+            }
+          }
+
           // Publish B1 once air has moved for 1 min; unavailable while off, resting or settling.
           bool b1_ok = moving && now - moving_since > 60000;
           if (b1_ok != b1_shown || (b1_ok && b1_dirty)) {
@@ -637,6 +662,8 @@ binary_sensor:
   - {platform: template, id: erv_power, name: "Power", device_class: running}
   # TXD 21 byte 0: 1 while boost runs. The ERV times boost itself and restores airflow.
   - {platform: template, id: boost, name: "Boost", device_class: running}
+  # On while the ERV's state line is live; off after 10 s without a frame (unpowered/disconnected).
+  - {platform: template, id: erv_connected, name: "ERV connected", device_class: connectivity, entity_category: diagnostic}
   # On while the fans run: off when the ERV is off or in the rest part of the ASHRAE cycle.
   - {platform: template, id: ventilating, name: "Ventilating", device_class: running}
   # Relay state: on while the board drives the ERV instead of the wall control.
