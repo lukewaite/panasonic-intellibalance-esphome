@@ -1,2 +1,6 @@
 [tools]
 "pipx:esphome" = "2026.10.1"
+
+[tasks.test]
+description = "Host tests for components/ervlink (VERBOSE=1 for every log line)"
+run = "test/run.sh"

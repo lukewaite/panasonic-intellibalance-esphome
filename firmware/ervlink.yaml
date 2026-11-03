@@ -1,8 +1,8 @@
-# ervlink — firmware for the rev A inline interface board.
+# ervlink — firmware for the rev A inline interface board (v14).
 #
 # Reads both lines of the ERV <-> wall control link through the comparator taps and
 # publishes every register to Home Assistant. The relay stays in hardware passthrough
-# except for short intercepts to send a command (v13):
+# except for short intercepts to send a command:
 #   Power and Boost (switches), Supply/Exhaust airflow, ASHRAE (selects):
 #     ~1.4 s each, sending the wall control's command frames for that button for 3 cycles,
 #     then 2 idle.
@@ -14,6 +14,10 @@
 # After a mains outage the ERV comes back off; if it was on before, the board turns it
 # back on ("Resume after power failure").
 #
+# The logic lives in components/ervlink/ervlink_core.{h,cpp} (tested on a host by
+# test/run.sh), loaded below from the repo at a tag. This file only wires it up: UART
+# bytes in; entities, relay, RXD driver and flash out.
+#
 #   RXD line = wall control -> ERV (commands), tapped on GPIO1, UART1, driven via GPIO10/Q2
 #   TXD line = ERV -> wall control (state),    tapped on GPIO0, UART0, driven via GPIO3/Q3
 #
@@ -21,16 +25,10 @@
 # invert again, so each UART is also a plain idle-high transmitter. Both taps sit on the
 # sending end of their line, so they keep reading live traffic while intercepting.
 # GPIO11 (relay) is driven low at boot. SW1 in PASS overrides it in hardware.
-#
-# Frame: 02 | A1 A0 | D7..D0 | 03 | BCC, ASCII hex, BCC = ~(XOR of A1..ETX).
-# The 8 data chars are 4 bytes, each sent LOW NIBBLE FIRST: "3103F0B4" = 13 30 0F 4B.
-# Decoded entities follow the 2026-10-29 button session (CLAUDE.md "Register map");
-# the raw hex sensors stay as ground truth.
 # Health check: frame rates should sit near 25/s (RXD) and 19/s (TXD) with zero bad
 # frames. Anything else means the tap or the UART settings are wrong, not a noisy bus.
 #
-# Self-contained on purpose: paste it into the ESPHome dashboard as-is.
-# Secrets needed in the dashboard's secrets.yaml:
+# Paste it into the ESPHome dashboard as-is. Secrets needed in its secrets.yaml:
 #   thread_tlv        HA: Settings > Devices & services > Thread > (your network) >
 #                     the (i) button > "Active dataset TLVs"
 #   ervlink_api_key   32-byte base64 key; also encrypts OTA uploads
@@ -50,6 +48,17 @@ esp32:
   flash_size: 8MB
   framework:
     type: esp-idf
+
+# The core. Bump ref to deploy a new version of it (tags fw-vNN).
+external_components:
+  - source:
+      type: git
+      url: https://github.com/lukewaite/panasonic-intellibalance-esphome
+      ref: fw-v14
+      path: firmware/components
+    components: [ervlink]
+
+ervlink: {}
 
 # Saved settings (Power on's airflow and ASHRAE, the Resume switch) are written to flash
 # within ~10 s of a change instead of the default 1 min, so an outage soon after a change
@@ -76,7 +85,7 @@ ota:
   - platform: esphome
     encryption: {}
 
-# Relay coil driver (Q1). High = intercept. Only the interval lambda below switches it.
+# Relay coil driver (Q1). High = intercept. Only the core switches it.
 output:
   - platform: gpio
     id: relay
@@ -104,20 +113,7 @@ uart:
     rx_buffer_size: 512
 
 globals:
-  - {id: rxd_frames, type: uint32_t, initial_value: "0"}
-  - {id: rxd_bad, type: uint32_t, initial_value: "0"}
-  - {id: rxd_junk, type: uint32_t, initial_value: "0"}
-  - {id: txd_frames, type: uint32_t, initial_value: "0"}
-  - {id: txd_bad, type: uint32_t, initial_value: "0"}
-  - {id: txd_junk, type: uint32_t, initial_value: "0"}
-  # Requests from the controls, merged and sent by the interval lambda. Power/boost: -1 none,
-  # 0 off, 1 on. Supply/exhaust: airflow code, ASHRAE: tens of min/h; 0 = none.
-  - {id: req_power, type: int8_t, initial_value: "-1"}
-  - {id: req_boost, type: int8_t, initial_value: "-1"}
-  - {id: req_supply, type: uint8_t, initial_value: "0"}
-  - {id: req_exhaust, type: uint8_t, initial_value: "0"}
-  - {id: req_ashrae, type: uint8_t, initial_value: "0"}
-  - {id: req_test, type: bool, initial_value: "false"}
+  - {id: erv, type: "ervlink::Core *", initial_value: "nullptr"}
   # Settings for Power on, saved while the ERV runs steadily without boost. Defaults are
   # the 2026-10-29 settings: 120/120 CFM (code 7), ASHRAE 30 min/h.
   - {id: saved_supply, type: uint8_t, restore_value: true, initial_value: "7"}
@@ -131,508 +127,85 @@ interval:
   - interval: 1ms
     then:
       - lambda: |-
-          struct Line {
-            const char *name;
-            uart::UARTComponent *uart;
-            uint32_t *frames, *bad, *junk;
-            uint8_t buf[13];
-            uint8_t len;
-            char last[3];       // address of the last good frame
-            uint32_t last_end;  // millis() when it completed
-          };
-          static Line lines[2] = {
-            {"RXD", id(uart_rxd), &id(rxd_frames), &id(rxd_bad), &id(rxd_junk), {}, 0, "", 0},
-            {"TXD", id(uart_txd), &id(txd_frames), &id(txd_bad), &id(txd_junk), {}, 0, "", 0},
-          };
-          // Latest decoded state, for the controls and for saving Power on's settings.
-          static bool on = false, boosting = false, moving = false;
-          static uint8_t cur_supply = 0, cur_exhaust = 0, cur_ashrae = 0;
-          static uint32_t settled_since = 0;
-          // B1 is only meaningful with air moving: while off or resting, the sensors drift to
-          // the air sitting in the unit (2026-10-30: "outside" 16 °C with 8 °C outside).
-          static bool power_known = false, b1_dirty = false, b1_shown = false;
-          static uint32_t moving_since = 0;
-          static uint8_t b1[4];
-          // Mains power-up. The wall control runs on the ERV's 5 V, so it boots with the ERV:
-          // it sends FFFFFFFF once on every RXD register, then nothing for ~2.1 s while the
-          // ERV's state line already runs (2025-12-14 capture). Either sign starts a resume
-          // episode, during which the ERV's "off" is the outage, not a choice. The episode ends
-          // once the ERV is on or the resume gives up, and want_on follows the ERV again.
-          // A dropout of one of the board's own taps is not mistaken for it in a harmful way:
-          // a TXD tap gap leaves RXD running (no episode), and an RXD tap gap leaves want_on
-          // current, so the episode ends at once.
-          static bool powerup = false, boot_checked = false, save_want = false;
-          static uint32_t powerup_at = 0, next_try = 0, listen_from = millis();
-          static uint8_t tries = 0;
-          static int8_t linked = -1;  // ERV state line: -1 not yet known, 0 silent, 1 live
-          // Whether the ERV should be running: its power state as last reported, except the
-          // "off" it comes back with after an outage. Kept in its own preference and committed
-          // as soon as the link is free, not at the next scheduled flash write.
+          // Whether the ERV should be running, in its own preference: the core asks for it
+          // to be committed at once, not at the next scheduled flash write.
           static ESPPreferenceObject want_pref =
               global_preferences->make_preference<bool>(fnv1_hash("ervlink_want_on"), true);
-          static bool want_on = [] {
-            bool v = true;
-            return want_pref.load(&v) ? v : true;
-          }();
-          auto remember = [&](bool v) {
-            if (v == want_on) return;
-            want_on = v;
-            save_want = true;
-            ESP_LOGI("ervlink", "remembered: the ERV should be %s", v ? "on" : "off");
-          };
-          auto arm_resume = [&](const char *why) {
-            if (powerup) return;
-            ESP_LOGI("ervlink", "mains power-up (%s)", why);
-            powerup = true;
-            powerup_at = millis();
-            next_try = powerup_at + 10000;
-            tries = 0;
-          };
-          auto end_resume = [&](const char *why) {
-            if (!powerup) return;
-            ESP_LOGI("ervlink", "resume episode over: %s", why);
-            powerup = false;
-            if (power_known) remember(on);
-          };
-          // The intercept's state (used here by the resume check, run further down).
-          enum Phase { IDLE, WAIT_IN, ACTIVE, WAIT_OUT };
-          static Phase phase = IDLE;
-
-          auto dump = [](const uint8_t *b, size_t n) {
-            std::string s;
-            char h[4];
-            for (size_t i = 0; i < n; i++) { snprintf(h, sizeof h, "%02X ", b[i]); s += h; }
-            return s;
-          };
-          auto is_hex = [](uint8_t c) { return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'); };
-          auto hexval = [](char c) -> uint8_t { return c <= '9' ? c - '0' : c - 'A' + 10; };
-
-          auto reg_sensor = [&](const std::string &a) -> text_sensor::TextSensor * {
-            if (a == "00") return id(reg_rxd_00);
-            if (a == "10") return id(reg_rxd_10);
-            if (a == "20") return id(reg_rxd_20);
-            if (a == "30") return id(reg_rxd_30);
-            if (a == "F0") return id(reg_rxd_f0);
-            if (a == "01") return id(reg_txd_01);
-            if (a == "11") return id(reg_txd_11);
-            if (a == "21") return id(reg_txd_21);
-            if (a == "31") return id(reg_txd_31);
-            if (a == "A1") return id(reg_txd_a1);
-            if (a == "B1") return id(reg_txd_b1);
-            if (a == "F1") return id(reg_txd_f1);
-            return nullptr;
-          };
-
-          // Airflow code: 50 + 10 x v up to 13 (180 CFM); the menu then jumps to 200,
-          // which is code 16. 14 and 15 have never been seen.
-          auto cfm = [](uint8_t v) { return v <= 13 ? 50.0f + 10.0f * v : v == 16 ? 200.0f : NAN; };
-          auto valid = [](uint8_t v) { return (v >= 1 && v <= 13 && v % 2) || v == 16; };
-          // The controls show the ERV's state; while off, the settings Power on will use.
-          // Called after every change and after every request, so a refused request (or
-          // one the ERV ignores) snaps back in HA.
-          auto publish_controls = [&]() {
-            if (!power_known) return;
-            id(power_switch).publish_state(on);
-            id(boost_switch).publish_state(on && boosting);
-            char s[16];
-            uint8_t sup = on && valid(cur_supply) ? cur_supply : id(saved_supply);
-            uint8_t exh = on && valid(cur_exhaust) ? cur_exhaust : id(saved_exhaust);
-            uint8_t ash = on ? cur_ashrae : id(saved_ashrae);
-            if (valid(sup)) { snprintf(s, sizeof s, "%d CFM", (int) cfm(sup)); id(supply_select).publish_state(s); }
-            if (valid(exh)) { snprintf(s, sizeof s, "%d CFM", (int) cfm(exh)); id(exhaust_select).publish_state(s); }
-            if (ash >= 1 && ash <= 6) { snprintf(s, sizeof s, "%d min/h", 10 * ash); id(ashrae_select).publish_state(s); }
-          };
-
-          auto handle = [&](Line &L) {
-            const uint8_t *f = L.buf;
-            bool ok = f[11] == 0x03;
-            uint8_t x = 0;
-            for (int i = 1; i <= 11; i++) {
-              if (i <= 10 && !is_hex(f[i])) ok = false;
-              x ^= f[i];
-            }
-            if (!ok || (uint8_t) ~x != f[12]) {
-              (*L.bad)++;
-              ESP_LOGW("ervlink", "%s bad frame (%s): %s", L.name,
-                       ok ? "BCC" : "format", dump(f, 13).c_str());
-              return;
-            }
-            (*L.frames)++;
-            uint32_t t = millis();
-            if (L.name[0] == 'T') {
-              // RXD otherwise never pauses for more than ~51 ms, intercepting or not (its tap
-              // reads the wall control); checked outside intercepts all the same.
-              if (!id(intercepting).state &&
-                  t - (lines[0].last_end ? lines[0].last_end : listen_from) > 500)
-                arm_resume("wall control silent while the ERV talks");
-              if (!boot_checked) {
-                boot_checked = true;
-                auto why = esp_reset_reason();
-                ESP_LOGI("ervlink", "first ERV frame at %u ms, listening from %u ms, reset reason %d",
-                         (unsigned) t, (unsigned) listen_from, (int) why);
-                // Started too late to see the wall control boot: go by the board's own power-up,
-                // as it most likely shared the outage (a USB replug looks the same).
-                if (listen_from > 1500 && (why == ESP_RST_POWERON || why == ESP_RST_BROWNOUT ||
-                                           why == ESP_RST_PWR_GLITCH))
-                  arm_resume("board power-on reset");
+          if (id(erv) == nullptr) {
+            using ervlink::Out;
+            ervlink::Hooks h;
+            h.value = [](Out o, float v) {
+              switch (o) {
+                case Out::POWER: id(erv_power).publish_state(v != 0); break;
+                case Out::VENTILATING: id(ventilating).publish_state(v != 0); break;
+                case Out::BOOST: id(boost).publish_state(v != 0); break;
+                case Out::CONNECTED: id(erv_connected).publish_state(v != 0); break;
+                case Out::INTERCEPTING: id(intercepting).publish_state(v != 0); break;
+                case Out::POWER_SWITCH: id(power_switch).publish_state(v != 0); break;
+                case Out::BOOST_SWITCH: id(boost_switch).publish_state(v != 0); break;
+                case Out::SUPPLY_CFM: id(airflow_supply).publish_state(v); break;
+                case Out::EXHAUST_CFM: id(airflow_exhaust).publish_state(v); break;
+                case Out::ASHRAE: id(ashrae).publish_state(v); break;
+                case Out::BOOST_MIN: id(boost_duration).publish_state(v); break;
+                case Out::INSIDE_TEMP: id(inside_temp).publish_state(v); break;
+                case Out::INSIDE_RH: id(inside_rh).publish_state(v); break;
+                case Out::OUTSIDE_TEMP: id(outside_temp).publish_state(v); break;
+                case Out::OUTSIDE_RH: id(outside_rh).publish_state(v); break;
+                default: break;
               }
-            }
-            L.last[0] = f[1]; L.last[1] = f[2]; L.last[2] = 0;
-            L.last_end = t;
-            std::string addr((const char *) f + 1, 2), data((const char *) f + 3, 8);
-            // No command sets all of a register to FF (00 byte 3 and 10/20 bytes 2-3 are always 0).
-            if (L.name[0] == 'R' && data == "FFFFFFFF") arm_resume("wall control burst");
-            // Low address nibble encodes direction: 0 on RXD, 1 on TXD.
-            char want = (L.name[0] == 'R') ? '0' : '1';
-            auto *s = addr[1] == want ? reg_sensor(addr) : nullptr;
-            if (s == nullptr) {
-              // Remember the last value per line+address so a few interleaved unknown
-              // registers are each reported once per change, not on every frame.
-              static std::map<std::string, std::string> seen;
-              std::string key = std::string(L.name) + " " + addr;
-              if (seen[key] != data) {
-                seen[key] = data;
-                ESP_LOGW("ervlink", "unexpected register: %s %s", key.c_str(), data.c_str());
-                id(reg_unknown).publish_state(key + " " + data);
-              }
-              return;
-            }
-            if (s->state == data) return;
-            ESP_LOGI("ervlink", "%s %s: %s -> %s", L.name, addr.c_str(),
-                     s->state.empty() ? "(none)" : s->state.c_str(), data.c_str());
-            s->publish_state(data);
-
-            // Byte k is chars 2k (low nibble) and 2k+1 (high nibble).
-            uint8_t b[4];
-            for (int k = 0; k < 4; k++) b[k] = hexval(data[2 * k]) | hexval(data[2 * k + 1]) << 4;
-            // While off the ERV zeroes 01 and 11, so their values mean nothing then.
-            settled_since = millis();
-            if (addr == "01") {
-              // Airflow FE/FE while on: the rest part of the ASHRAE cycle (2026-10-30: at
-              // 30 min/h, FE exactly 30 min after the setting took effect). Fans stopped.
-              bool resting = b[1] == 0xFE && b[2] == 0xFE;
-              bool now_moving = b[0] && !resting;
-              // A unit already moving air at boot counts as settled.
-              if (now_moving && !moving) moving_since = power_known ? millis() : millis() - 60000;
-              power_known = true;
-              on = b[0] != 0;
-              if (!powerup) remember(on);
-              else if (on) end_resume("the ERV is on");
-              moving = now_moving;
-              cur_supply = b[1];
-              cur_exhaust = b[2];
-              id(erv_power).publish_state(on);
-              id(ventilating).publish_state(moving);
-              id(airflow_supply).publish_state(!on ? NAN : resting ? 0.0f : cfm(b[1]));
-              id(airflow_exhaust).publish_state(!on ? NAN : resting ? 0.0f : cfm(b[2]));
-              if (!on) id(ashrae).publish_state(NAN);
-            } else if (addr == "11") {
-              cur_ashrae = b[0];
-              id(ashrae).publish_state(on ? 10.0f * b[0] : NAN);
-              id(boost_duration).publish_state(b[1] ? 10.0f * b[1] : NAN);
-            } else if (addr == "21") {
-              boosting = b[0] != 0;
-              id(boost).publish_state(boosting);
-            } else if (addr == "B1") {
-              memcpy(b1, b, 4);
-              b1_dirty = true;
-            }
-            if (addr == "01" || addr == "11" || addr == "21") publish_controls();
-          };
-
-          for (auto &L : lines) {
-            uint8_t c;
-            while (L.uart->available() && L.uart->read_byte(&c)) {
-              if (L.len == 0) {
-                if (c == 0x02) L.buf[L.len++] = c;
-                else (*L.junk)++;
-                continue;
-              }
-              // Bytes 1..11 are ASCII hex or ETX, never STX, so an STX there means the
-              // previous frame was cut short: count it and resync. Byte 12 (BCC) can be 02.
-              if (c == 0x02 && L.len < 12) {
-                (*L.bad)++;
-                ESP_LOGW("ervlink", "%s truncated frame: %s", L.name, dump(L.buf, L.len).c_str());
-                L.len = 1;
-                continue;
-              }
-              L.buf[L.len++] = c;
-              if (L.len == 13) {
-                handle(L);
-                L.len = 0;
-              }
-            }
-          }
-
-          uint32_t now = millis();
-
-          // No state from the ERV for 10 s: it is unpowered or disconnected. Report it as off
-          // (so "off for 10 minutes" alerts still fire) with no readings, refuse commands, and
-          // forget the last registers so the ERV's first frames on return are decoded afresh
-          // (cleared without publishing, so HA history shows no fake change).
-          // Not recorded in want_on: that only follows what the ERV reports.
-          bool now_linked = lines[1].last_end && now - lines[1].last_end < 10000;
-          // At boot, give the ERV the same 10 s before calling it missing.
-          if (now_linked != linked && (lines[1].last_end || now > 10000)) {
-            linked = now_linked;
-            id(erv_connected).publish_state(now_linked);
-            if (!now_linked) {
-              ESP_LOGW("ervlink", "no state from the ERV for 10 s: reporting it off");
-              power_known = on = moving = boosting = false;
-              id(erv_power).publish_state(false);
-              id(ventilating).publish_state(false);
-              id(boost).publish_state(false);
-              id(power_switch).publish_state(false);
-              id(boost_switch).publish_state(false);
-              id(airflow_supply).publish_state(NAN);
-              id(airflow_exhaust).publish_state(NAN);
-              id(ashrae).publish_state(NAN);
-              id(boost_duration).publish_state(NAN);
-              for (auto *t : {id(reg_txd_01), id(reg_txd_11), id(reg_txd_21), id(reg_txd_31),
-                              id(reg_txd_a1), id(reg_txd_b1), id(reg_txd_f1)})
-                t->state = "";
-            }
-          }
-
-          // Publish B1 once air has moved for 1 min; unavailable while off, resting or settling.
-          bool b1_ok = moving && now - moving_since > 60000;
-          if (b1_ok != b1_shown || (b1_ok && b1_dirty)) {
-            id(inside_temp).publish_state(b1_ok ? (int8_t) b1[0] : NAN);
-            id(inside_rh).publish_state(b1_ok ? b1[1] : NAN);
-            id(outside_temp).publish_state(b1_ok ? (int8_t) b1[2] : NAN);
-            id(outside_rh).publish_state(b1_ok ? b1[3] : NAN);
-            b1_shown = b1_ok;
-            b1_dirty = false;
-          }
-
-          // Resume after a power failure: the ERV came back off, but it should be on. Up to 3
-          // tries, 30 s apart, in case the ERV wasn't ready (a try counts once its relay goes
-          // in); waits up to 2 min for the ERV's state and gives up after 5 min.
-          if (powerup && (int32_t) (now - next_try) >= 0) {
-            if (power_known && on) {
-              end_resume("the ERV is on");
-            } else if (!id(resume_switch).state) {
-              end_resume("resume is switched off");
-            } else if (!want_on) {
-              end_resume("the ERV was off before");
-            } else if (!power_known) {
-              if (now - powerup_at > 120000) end_resume("no state from the ERV");
-              else next_try = now + 1000;
-            } else if (tries >= 3 || now - powerup_at > 300000) {
-              end_resume("gave up, the ERV stays off");
-            } else if (phase != IDLE || id(req_power) >= 0) {
-              next_try = now + 1000;
-            } else {
-              next_try = now + 30000;
-              ESP_LOGW("ervlink", "ERV off after power-up but it was on: turning it back on");
-              id(req_power) = 1;
-            }
-          }
-
-          // Save the settings for Power on once 01/11/21 have been unchanged for 5 s with
-          // the ERV on and not boosting (boost reports 200/200 in 01, which isn't a setting).
-          if (on && !boosting && now - settled_since > 5000 && valid(cur_supply) &&
-              valid(cur_exhaust) && cur_ashrae >= 1 && cur_ashrae <= 6 &&
-              (cur_supply != id(saved_supply) || cur_exhaust != id(saved_exhaust) ||
-               cur_ashrae != id(saved_ashrae))) {
-            id(saved_supply) = cur_supply;
-            id(saved_exhaust) = cur_exhaust;
-            id(saved_ashrae) = cur_ashrae;
-            ESP_LOGI("ervlink", "saved settings for Power on: supply %u, exhaust %u, ASHRAE %u",
-                     cur_supply, cur_exhaust, cur_ashrae);
-          }
-
-          // ---- Intercept ----
-          // The wall control sends its 5 RXD frames back to back (~150 ms) every 200 ms,
-          // then leaves a ~51 ms gap; the ERV's TXD cycle ends in a ~81 ms gap (longer after
-          // F1). The relay switches both lines at once and needs a few ms, so it switches
-          // only inside a gap, judged from when the last cycle's final frame completed. UART
-          // receive latency (a few ms) is covered by the 20 ms margin.
-          static HighFrequencyLoopRequester fast;
-          static uint8_t cycles = 0, sent = 0;
-          static uint32_t t_req = 0, t_next = 0, t_rx00 = 0, t_on = 0;
-          // The command to send: 00/10/20, FF = leave this byte alone (as the wall control).
-          static uint8_t c00[4], c10[4], c20[4];
-          static bool has_cmd = false;
-          static const char *what = "";
-
-          auto gap_left = [&](Line &L, std::initializer_list<const char *> ends, int gap) {
-            if (L.len != 0 || L.uart->available()) return -1;
-            for (auto *e : ends)
-              if (strcmp(L.last, e) == 0) return gap - (int) (now - L.last_end);
-            return -1;
-          };
-          int rx_left = gap_left(lines[0], {"F0"}, 51);
-          int tx_left = gap_left(lines[1], {"31", "F1"}, 81);
-          // The wall control's cycle start, from its 00 frame (30 ms long).
-          if (strcmp(lines[0].last, "00") == 0) t_rx00 = lines[0].last_end - 30;
-
-          auto set_relay = [&](bool v) {
-            if (v) id(relay).turn_on(); else id(relay).turn_off();
-            id(intercepting).publish_state(v);
-          };
-          // One RXD frame: STX, address, 4 bytes as 8 hex chars low nibble first, ETX, BCC.
-          auto frame = [](std::vector<uint8_t> &out, const char *addr, const uint8_t *v) {
-            static const char hex[] = "0123456789ABCDEF";
-            size_t start = out.size();
-            out.push_back(0x02);
-            out.push_back(addr[0]);
-            out.push_back(addr[1]);
-            for (int k = 0; k < 4; k++) { out.push_back(hex[v[k] & 0xF]); out.push_back(hex[v[k] >> 4]); }
-            out.push_back(0x03);
-            uint8_t bcc = 0;
-            for (size_t i = start + 1; i < out.size(); i++) bcc ^= out[i];
-            out.push_back((uint8_t) ~bcc);
-          };
-
-          const uint8_t idle00[4] = {0xFF, 0xFF, 0xFF, 0}, idle10[4] = {0xFF, 0xFF, 0, 0},
-                        idle20[4] = {0xFF, 0, 0, 0}, zero[4] = {0, 0, 0, 0};
-          if (phase == IDLE && (id(req_power) >= 0 || id(req_boost) >= 0 || id(req_supply) ||
-                                id(req_exhaust) || id(req_ashrae) || id(req_test))) {
-            int8_t rp = id(req_power), rb = id(req_boost);
-            uint8_t rs = id(req_supply), re = id(req_exhaust), ra = id(req_ashrae);
-            bool test = id(req_test);
-            id(req_power) = id(req_boost) = -1;
-            id(req_supply) = id(req_exhaust) = id(req_ashrae) = 0;
-            id(req_test) = false;
-            memcpy(c00, idle00, 4); memcpy(c10, idle10, 4); memcpy(c20, idle20, 4);
-            has_cmd = false;
-            what = "Intercept test";
-            // Commands as the wall control sends them (2026-10-29 session, CLAUDE.md).
-            auto snapshot = [&](uint8_t power) {
-              const uint8_t a[4] = {power, id(saved_supply), id(saved_exhaust), 0},
-                            b[4] = {id(saved_ashrae), 0xFF, 0, 0};
-              memcpy(c00, a, 4); memcpy(c10, b, 4); memcpy(c20, zero, 4);
-              has_cmd = true;
             };
-            // Off while the ERV is off or unknown (say, after an outage) sends nothing, but it
-            // is a choice: no resume.
-            if (rp == 0 && !(power_known && on)) {
-              end_resume("Power off requested");
-              remember(false);
-            }
-            if (!power_known) {
-              ESP_LOGW("ervlink", "request ignored: ERV state not known yet");
-              test = false;
-            } else if (!on) {
-              // Settings while off only change what Power on will send.
-              if (rs) id(saved_supply) = rs;
-              if (re) id(saved_exhaust) = re;
-              if (ra) id(saved_ashrae) = ra;
-              if (rb == 1) ESP_LOGW("ervlink", "Boost ignored: the ERV is off");
-              if (rp == 1) { snapshot(1); what = "Power on"; }
-            } else if (rp == 0) {
-              snapshot(0);
-              what = "Power off";
-            } else if (rb == 1 && !boosting) {
-              const uint8_t a[4] = {1, 0xFF, 0xFF, 0}, b[4] = {cur_ashrae, 6, 0, 0}, c[4] = {1, 0, 0, 0};
-              memcpy(c00, a, 4); memcpy(c10, b, 4); memcpy(c20, c, 4);
-              has_cmd = true;
-              what = "Boost on";
-            } else if (rb == 0 && boosting) {
-              // The wall control's cancel: boost off plus an explicit airflow restore.
-              const uint8_t a[4] = {1, id(saved_supply), id(saved_exhaust), 0}, b[4] = {cur_ashrae, 6, 0, 0};
-              memcpy(c00, a, 4); memcpy(c10, b, 4); memcpy(c20, zero, 4);
-              has_cmd = true;
-              what = "Boost off";
-            } else {
-              what = "Settings";
-              if ((rs || re) && boosting) {
-                ESP_LOGW("ervlink", "airflow change ignored while boosting");
-              } else {
-                if (rs && rs != cur_supply) { c00[1] = rs; has_cmd = true; }
-                if (re && re != cur_exhaust) { c00[2] = re; has_cmd = true; }
+            h.text = [](Out o, const std::string &s) {
+              switch (o) {
+                case Out::SUPPLY_SELECT: id(supply_select).publish_state(s); break;
+                case Out::EXHAUST_SELECT: id(exhaust_select).publish_state(s); break;
+                case Out::ASHRAE_SELECT: id(ashrae_select).publish_state(s); break;
+                case Out::UNKNOWN_REG: id(reg_unknown).publish_state(s); break;
+                default: break;
               }
-              if (ra && ra != cur_ashrae) { c10[0] = ra; has_cmd = true; }
-            }
-            publish_controls();
-            bool fresh = now - lines[1].last_end < 1000 && now - lines[0].last_end < 1000;
-            if (!has_cmd && !test) {
-              // Nothing to send (already in that state, or ignored above).
-            } else if (!fresh) {
-              ESP_LOGW("ervlink", "%s refused: no live traffic on both lines", what);
-            } else {
-              // A command: 3 cycles (the wall control holds each command for 3), then 2 idle.
-              // Test: 3 idle cycles.
-              cycles = has_cmd ? 5 : 3;
-              sent = 0;
-              t_req = now;
-              phase = WAIT_IN;
-              fast.start();
-              ESP_LOGI("ervlink", "%s: waiting for a gap on both lines", what);
-            }
+            };
+            h.reg = [](ervlink::Line l, const std::string &a, const std::string &d) {
+              text_sensor::TextSensor *t = nullptr;
+              if (l == ervlink::RXD) {
+                t = a == "00" ? id(reg_rxd_00) : a == "10" ? id(reg_rxd_10) : a == "20" ? id(reg_rxd_20)
+                  : a == "30" ? id(reg_rxd_30) : id(reg_rxd_f0);
+              } else {
+                t = a == "01" ? id(reg_txd_01) : a == "11" ? id(reg_txd_11) : a == "21" ? id(reg_txd_21)
+                  : a == "31" ? id(reg_txd_31) : a == "A1" ? id(reg_txd_a1) : a == "B1" ? id(reg_txd_b1)
+                  : id(reg_txd_f1);
+              }
+              t->publish_state(d);
+            };
+            h.relay = [](bool v) { if (v) id(relay).turn_on(); else id(relay).turn_off(); };
+            h.send = [](const uint8_t *p, size_t n) { id(uart_rxd).write_array(p, n); };
+            h.save_want = [](bool v) {
+              want_pref.save(&v);
+              global_preferences->sync();
+            };
+            h.save_settings = [](const ervlink::Settings &s) {
+              id(saved_supply) = s.supply;
+              id(saved_exhaust) = s.exhaust;
+              id(saved_ashrae) = s.ashrae;
+            };
+            h.resume_enabled = []() { return id(resume_switch).state; };
+            h.log = [](int level, const char *m) {
+              if (level == 0) ESP_LOGE("ervlink", "%s", m);
+              else if (level == 1) ESP_LOGW("ervlink", "%s", m);
+              else ESP_LOGI("ervlink", "%s", m);
+            };
+            bool want_on = true;
+            if (!want_pref.load(&want_on)) want_on = true;
+            auto why = esp_reset_reason();
+            bool power_reset = why == ESP_RST_POWERON || why == ESP_RST_BROWNOUT || why == ESP_RST_PWR_GLITCH;
+            id(erv) = new ervlink::Core(h, want_on, {id(saved_supply), id(saved_exhaust), id(saved_ashrae)},
+                                        power_reset, millis());
           }
-
-          if (phase == WAIT_IN) {
-            // Prefer a gap on both lines. They drift through each other over ~400 s and a
-            // shared gap can be missing for a few minutes, so after 30 s settle for an RXD gap
-            // only: the ERV still gets clean frames, the wall control may get one cut-off
-            // state frame (it fails BCC).
-            bool shared = rx_left >= 20 && tx_left >= 20;
-            bool late = now - t_req > 30000;
-            if (shared || (late && rx_left >= 20)) {
-              set_relay(true);
-              t_on = now;
-              if (powerup && strcmp(what, "Power on") == 0) tries++;
-              // Continue the wall control's cadence: the next cycle would start 200 ms after
-              // the last one.
-              t_next = t_rx00 + 200;
-              while ((int32_t) (t_next - now) < 15) t_next += 200;
-              phase = ACTIVE;
-              ESP_LOGI("ervlink", "relay in (RXD gap %d ms, TXD gap %d ms left)", rx_left, tx_left);
-            } else if (now - t_req > 60000) {
-              phase = IDLE;
-              fast.stop();
-              ESP_LOGW("ervlink", "intercept abandoned: no RXD gap found in 60 s");
-            }
-          }
-
-          if (phase == ACTIVE && sent == cycles) {
-            // The last cycle started at t_next - 200 and takes ~150 ms to send.
-            if ((int32_t) (now - (t_next - 200 + 160)) >= 0) phase = WAIT_OUT;
-          } else if (phase == ACTIVE && (int32_t) (now - t_next) >= 0) {
-            bool cmd = has_cmd && sent < 3;
-            std::vector<uint8_t> out;
-            frame(out, "00", cmd ? c00 : idle00);
-            frame(out, "10", cmd ? c10 : idle10);
-            frame(out, "20", cmd ? c20 : idle20);
-            frame(out, "30", zero);
-            frame(out, "F0", zero);
-            id(uart_rxd).write_array(out.data(), out.size());
-            if (sent == 0 && cmd)
-              ESP_LOGI("ervlink", "sending %s: 00 %s/ 10 %s/ 20 %s", what, dump(c00, 4).c_str(),
-                       dump(c10, 4).c_str(), dump(c20, 4).c_str());
-            sent++;
-            t_next += 200;
-          }
-
-          if (phase == WAIT_OUT) {
-            // Our cycles kept the wall control's phase, so its RXD gap lines up with ours and
-            // this is normally true at once. Waiting longer wouldn't find a TXD gap either:
-            // the two lines' phase barely moves in a second.
-            if (rx_left >= 20 || now - t_on > 4000) {
-              set_relay(false);
-              phase = IDLE;
-              fast.stop();
-              ESP_LOGI("ervlink", "relay out after %u ms (RXD gap %d ms, TXD gap %d ms left)",
-                       (unsigned) (now - t_on), rx_left, tx_left);
-            }
-          }
-
-          // Last resort: never hold the link for more than 5 s.
-          if (phase != IDLE && phase != WAIT_IN && now - t_on > 5000) {
-            set_relay(false);
-            phase = IDLE;
-            fast.stop();
-            ESP_LOGE("ervlink", "intercept timed out; relay forced out");
-          }
-
-          // Commit want_on (a flash write takes tens of ms) only while not holding the link.
-          if (save_want && phase == IDLE) {
-            save_want = false;
-            want_pref.save(&want_on);
-            global_preferences->sync();
-          }
+          uint32_t now = millis();
+          uint8_t c;
+          while (id(uart_rxd).available() && id(uart_rxd).read_byte(&c)) id(erv)->feed(ervlink::RXD, c, now);
+          while (id(uart_txd).available() && id(uart_txd).read_byte(&c)) id(erv)->feed(ervlink::TXD, c, now);
+          id(erv)->tick(now);
+          static HighFrequencyLoopRequester fast;
+          if (id(erv)->busy()) fast.start(); else fast.stop();
 
 button:
   - platform: template
@@ -640,9 +213,9 @@ button:
     icon: "mdi:swap-horizontal"
     entity_category: diagnostic
     on_press:
-      - lambda: id(req_test) = true;
+      - lambda: if (id(erv)) id(erv)->request_test();
 
-# The controls only post a request; the interval lambda sends it and publishes their state
+# The controls only post a request; the core sends it and publishes their state
 # from what the ERV reports. restore_mode DISABLED: never send anything at boot.
 switch:
   - platform: template
@@ -651,9 +224,9 @@ switch:
     icon: "mdi:power"
     restore_mode: DISABLED
     turn_on_action:
-      - lambda: id(req_power) = 1;
+      - lambda: if (id(erv)) id(erv)->request_power(true);
     turn_off_action:
-      - lambda: id(req_power) = 0;
+      - lambda: if (id(erv)) id(erv)->request_power(false);
   - platform: template
     id: resume_switch
     name: "Resume after power failure"
@@ -669,9 +242,9 @@ switch:
     icon: "mdi:fan-plus"
     restore_mode: DISABLED
     turn_on_action:
-      - lambda: id(req_boost) = 1;
+      - lambda: if (id(erv)) id(erv)->request_boost(true);
     turn_off_action:
-      - lambda: id(req_boost) = 0;
+      - lambda: if (id(erv)) id(erv)->request_boost(false);
 
 select:
   # The wall control's menu: 20 CFM steps (codes 1, 3, ... 13, then 16 for 200).
@@ -683,7 +256,7 @@ select:
     set_action:
       - lambda: |-
           int c = atoi(x.c_str());
-          id(req_supply) = c >= 200 ? 16 : (c - 50) / 10;
+          if (id(erv)) id(erv)->request_supply(c >= 200 ? 16 : (c - 50) / 10);
   - platform: template
     id: exhaust_select
     name: "Exhaust airflow"
@@ -692,14 +265,14 @@ select:
     set_action:
       - lambda: |-
           int c = atoi(x.c_str());
-          id(req_exhaust) = c >= 200 ? 16 : (c - 50) / 10;
+          if (id(erv)) id(erv)->request_exhaust(c >= 200 ? 16 : (c - 50) / 10);
   - platform: template
     id: ashrae_select
     name: "ASHRAE run time"
     icon: "mdi:timer-cog-outline"
     options: ["10 min/h", "20 min/h", "30 min/h", "40 min/h", "50 min/h", "60 min/h"]
     set_action:
-      - lambda: id(req_ashrae) = atoi(x.c_str()) / 10;
+      - lambda: if (id(erv)) id(erv)->request_ashrae(atoi(x.c_str()) / 10);
 
 text_sensor:
   # Raw registers. The decoded ones (00/10/20, 01/11/21, B1) are disabled by default: the
@@ -760,7 +333,7 @@ sensor:
     update_interval: 10s
     lambda: |-
       static uint32_t n0 = 0, t0 = 0;
-      uint32_t n = id(rxd_frames), t = millis();
+      uint32_t n = id(erv) ? id(erv)->stats(ervlink::RXD).frames : 0, t = millis();
       float r = t0 ? (n - n0) * 1000.0f / (t - t0) : NAN;
       n0 = n; t0 = t;
       return r;
@@ -772,12 +345,12 @@ sensor:
     update_interval: 10s
     lambda: |-
       static uint32_t n0 = 0, t0 = 0;
-      uint32_t n = id(txd_frames), t = millis();
+      uint32_t n = id(erv) ? id(erv)->stats(ervlink::TXD).frames : 0, t = millis();
       float r = t0 ? (n - n0) * 1000.0f / (t - t0) : NAN;
       n0 = n; t0 = t;
       return r;
-  - {platform: template, name: "RXD bad frames", lambda: "return id(rxd_bad);", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, update_interval: 10s}
-  - {platform: template, name: "TXD bad frames", lambda: "return id(txd_bad);", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, update_interval: 10s}
-  - {platform: template, name: "RXD junk bytes", lambda: "return id(rxd_junk);", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, disabled_by_default: true, update_interval: 10s}
-  - {platform: template, name: "TXD junk bytes", lambda: "return id(txd_junk);", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, disabled_by_default: true, update_interval: 10s}
+  - {platform: template, name: "RXD bad frames", lambda: "return id(erv) ? id(erv)->stats(ervlink::RXD).bad : 0;", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, update_interval: 10s}
+  - {platform: template, name: "TXD bad frames", lambda: "return id(erv) ? id(erv)->stats(ervlink::TXD).bad : 0;", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, update_interval: 10s}
+  - {platform: template, name: "RXD junk bytes", lambda: "return id(erv) ? id(erv)->stats(ervlink::RXD).junk : 0;", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, disabled_by_default: true, update_interval: 10s}
+  - {platform: template, name: "TXD junk bytes", lambda: "return id(erv) ? id(erv)->stats(ervlink::TXD).junk : 0;", state_class: total_increasing, accuracy_decimals: 0, entity_category: diagnostic, disabled_by_default: true, update_interval: 10s}
   - {platform: uptime, name: "Uptime", entity_category: diagnostic}
