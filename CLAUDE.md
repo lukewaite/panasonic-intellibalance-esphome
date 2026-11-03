@@ -14,8 +14,9 @@ state line. The physical terminal labels are the other way round. Read `docs/pro
 - `docs/protocol.md`: the decoded protocol, its quirks, and how to decode a capture.
 - `hardware/DESIGN.md`: the board. `hardware/STATUS.md`: build/bring-up log and what's untested.
   `hardware/kicad/README.md`: regenerating the board (generated; edit `gen/*.py` only).
-- `firmware/components/ervlink/`: all firmware behaviour (plain C++). `firmware/ervlink-package.yaml`:
-  the ESPHome package; `ervlink.yaml` is the installed device's config.
+- `docs/firmware.md`: how the firmware intercepts and resumes. All behaviour is in
+  `firmware/components/ervlink/` (plain C++); `firmware/ervlink-package.yaml` is the ESPHome
+  package and `ervlink.yaml` the installed device's config.
 - `captures/YYYY-MM-DD/`: captures with timestamped notes; the source for every protocol claim.
 
 ## Commands
