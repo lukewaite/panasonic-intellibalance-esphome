@@ -21,7 +21,7 @@ substitutions:
   name: ervlink
   friendly_name: ERV link
 packages:
-  ervlink: github://lukewaite/panasonic-intellibalance-esphome/firmware/ervlink-package.yaml@fw-v16
+  ervlink: github://lukewaite/panasonic-intellibalance-esphome/firmware/ervlink-package.yaml@main
 esphome:
   name: ${name}
   friendly_name: ${friendly_name}
@@ -33,7 +33,8 @@ wifi:                       # or Thread: see firmware/ervlink.yaml
   password: !secret wifi_password
 ```
 
-To update, change the `@fw-vNN` tag and install.
+`@main` follows the latest release (ESPHome refreshes it daily, and `main` always loads the
+core at its latest release tag). To stay on one version, use a tag instead: `@fw-v16`.
 
 ## What's here
 
