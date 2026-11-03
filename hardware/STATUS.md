@@ -140,8 +140,10 @@ Done: listen-only register mapping, intercept forward-only, injecting the turn-o
 brick: `captures/2026-11-02/2026-11-02-notes.md`). Since v13 a power-up is recognised as the wall
 control booting: its `FFFFFFFF` burst on any RXD register, or RXD silent >0.5 s while the ERV's
 TXD runs (it is quiet ~2.1 s after power-up). The board's own power-on reset counts only if it
-started listening too late (>1.5 s after boot) to see that. Still to test: the board losing power
-with the ERV (brick on the same circuit, or unplug both).
+started listening too late (>1.5 s after boot) to see that. Since v14 (2026-11-02) the logic is
+host-tested (`firmware/test/`); the simulation showed v13 would **not** have resumed when the
+board loses power with the ERV (it learned the post-outage "off" first), fixed in v14. Still to
+test for real: that case (brick on the same circuit, or unplug both).
 
 ## Box
 
